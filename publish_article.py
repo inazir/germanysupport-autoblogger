@@ -5,6 +5,12 @@ Standalone script for automated article publishing via GitHub Actions.
 Reads all credentials from environment variables (set as GitHub Secrets).
 
 Schedule: runs twice a week (Monday + Thursday) via .github/workflows/autoblog.yml
+
+Topic strategy:
+  1. Try the hardcoded SEED_TOPICS first (starter list).
+  2. If all seed topics are covered, ask Claude to generate 20 fresh topics
+     based on what's already published — so it never repeats and always
+     finds new angles. This repeats forever.
 """
 
 import os
@@ -69,9 +75,9 @@ REFERRAL_LINKS = {
 }
 
 # ============================================================
-#  📝  TOPIC POOL  (32 high-demand, low-competition topics)
+#  🌱  SEED TOPIC POOL  (starter list — used first)
 # ============================================================
-TOPIC_POOL = [
+SEED_TOPICS = [
     # BANKING & FINANCE
     "How to open a bank account in Germany as a foreigner in 2025",
     "Best free bank accounts in Germany for expats: N26 vs C24 vs Commerzbank",
@@ -178,20 +184,106 @@ def topic_already_covered(topic, existing_titles, threshold=0.55):
     return False, None
 
 
-def pick_fresh_topic(existing_titles):
-    """Shuffle pool and return first topic not already covered."""
-    shuffled = TOPIC_POOL.copy()
+def pick_from_pool(pool, existing_titles):
+    """Try to find a fresh topic from a given list. Returns (topic | None, skipped_list)."""
+    shuffled = pool.copy()
     random.shuffle(shuffled)
     skipped = []
     for topic in shuffled:
         covered, matched = topic_already_covered(topic, existing_titles)
         if covered:
             skipped.append((topic, matched))
-            print(f"  SKIP: '{topic[:70]}'")
-            print(f"        Similar to: '{matched[:70]}'")
         else:
             return topic, skipped
     return None, skipped
+
+
+def generate_new_topics(existing_titles, count=20):
+    """
+    Ask Claude to generate `count` brand-new topic ideas for expats in Germany,
+    explicitly avoiding anything similar to what is already published.
+    Returns a list of topic strings.
+    """
+    client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+
+    # Send a sample of existing titles so Claude avoids repeating them
+    sample = existing_titles[:80]
+    existing_str = "\n".join(f"- {t}" for t in sample)
+
+    prompt = f"""
+You are an SEO strategist for a website that helps expats living in Germany (germanysupport.de).
+
+Generate exactly {count} NEW article topic ideas that:
+1. Target expats, immigrants, and foreigners living in Germany
+2. Are high-demand and low-competition (specific, long-tail questions)
+3. Are NOT similar to any of the already-published articles listed below
+4. Cover practical topics such as: banking, insurance, taxes, housing,
+   mobile/internet, utilities, healthcare, bureaucracy, transport, work,
+   daily life, culture shock, German language tips, childcare, schooling,
+   social benefits, retirement, side hustles, freelancing, online shopping,
+   public transport, cycling, German food, expat communities, and more
+5. Are written as specific, helpful guide titles
+   (e.g. "How to...", "Best... for expats", "Guide to...", "X vs Y in Germany")
+
+Already published — do NOT repeat or closely overlap these:
+{existing_str}
+
+Output ONLY a valid JSON array of {count} topic strings. No markdown, no explanation.
+Example: ["Topic one here", "Topic two here", ...]
+"""
+
+    print("  Asking Claude to generate new topics...")
+    response = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=1500,
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    raw = response.content[0].text.strip()
+    raw = re.sub(r"^```json\s*", "", raw)
+    raw = re.sub(r"^```\s*", "", raw)
+    raw = re.sub(r"```$", "", raw).strip()
+
+    topics = json.loads(raw)
+    print(f"  Claude generated {len(topics)} new topic ideas.")
+    return topics
+
+
+def pick_fresh_topic(existing_titles):
+    """
+    Full topic-picking strategy:
+      Phase 1 — Try the seed pool.
+      Phase 2 — If seeds exhausted, generate new topics with Claude and try those.
+                 Repeats up to 5 times (= up to 100 AI-generated ideas per run).
+                 Effectively infinite — the site would need thousands of posts
+                 on the same niche before this ever truly fails.
+
+    Returns (chosen_topic, source) where source is 'seed' or 'ai-generated'.
+    """
+    # Phase 1: seed pool
+    print("  Checking seed topic pool...")
+    topic, skipped = pick_from_pool(SEED_TOPICS, existing_titles)
+    if topic:
+        print(f"  Found fresh seed topic ({len(skipped)} seeds already covered).")
+        return topic, "seed"
+
+    print(f"  All {len(SEED_TOPICS)} seed topics are already covered.")
+    print("  Switching to AI-generated topics (this runs forever)...")
+
+    # Phase 2: AI generation loop
+    max_attempts = 5
+    for attempt in range(1, max_attempts + 1):
+        print(f"  AI topic generation attempt {attempt}/{max_attempts}...")
+        new_topics = generate_new_topics(existing_titles, count=20)
+        topic, _ = pick_from_pool(new_topics, existing_titles)
+        if topic:
+            print(f"  Found a fresh AI-generated topic on attempt {attempt}.")
+            return topic, "ai-generated"
+        print("  All generated topics overlapped existing posts. Retrying...")
+
+    # Should essentially never happen for a niche site
+    print("ERROR: Could not find a fresh topic after AI generation. Add more niche angles.")
+    sys.exit(1)
 
 
 def generate_article(topic):
@@ -235,7 +327,7 @@ Available referral links — embed naturally where relevant:
 Output ONLY the raw JSON object.
 """
 
-    print("  Calling Claude API...")
+    print("  Calling Claude API to write article...")
     response = client.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=4096,
@@ -284,7 +376,6 @@ def upload_image(img_bytes, slug, title, photographer):
     media_data = r.json()
     media_id = media_data["id"]
 
-    # Set alt text and caption
     requests.post(
         f"{WP_URL}/wp-json/wp/v2/media/{media_id}",
         headers=HEADERS,
@@ -297,7 +388,6 @@ def upload_image(img_bytes, slug, title, photographer):
 
 
 def sync_tags(tag_names):
-    """Create or find tags, return list of IDs."""
     tag_ids = []
     for name in tag_names:
         try:
@@ -315,7 +405,6 @@ def sync_tags(tag_names):
 
 
 def sync_categories(cat_names):
-    """Create or find categories, return list of IDs."""
     cat_ids = []
     for name in (cat_names or ["Expat Guide"]):
         try:
@@ -333,7 +422,6 @@ def sync_categories(cat_names):
 
 
 def publish_post(article, featured_id, tag_ids, cat_ids, photographer):
-    """Create and publish the WordPress post."""
     footer = (
         f'<hr/><p><em>Featured image by <strong>{photographer}</strong> via '
         f'<a href="https://www.pexels.com" target="_blank" rel="nofollow">Pexels</a>.</em></p>'
@@ -374,14 +462,11 @@ def main():
     existing_titles = fetch_all_post_titles()
     print(f"      Found {len(existing_titles)} published posts.")
 
-    # 2. Pick a fresh topic
+    # 2. Pick a fresh topic (seed pool → AI-generated, forever)
     print("\n[2/6] Picking an uncovered topic...")
-    chosen_topic, skipped = pick_fresh_topic(existing_titles)
-    if not chosen_topic:
-        print("\nERROR: All topics in TOPIC_POOL have already been published!")
-        print("Add new topics to TOPIC_POOL and redeploy.")
-        sys.exit(1)
-    print(f"      Selected: {chosen_topic}")
+    chosen_topic, source = pick_fresh_topic(existing_titles)
+    print(f"      Source : {source}")
+    print(f"      Topic  : {chosen_topic}")
 
     # 3. Generate article with Claude
     print("\n[3/6] Generating article with Claude...")
@@ -392,12 +477,12 @@ def main():
     print(f"      Tags     : {', '.join(article['tags'][:5])} ...")
     print(f"      Words    : ~{len(article['content'].split())}")
 
-    # 4. Fetch featured image from Pexels
+    # 4. Fetch featured image
     print(f"\n[4/6] Fetching image from Pexels: '{article['image_search_query']}'...")
     img_bytes, photographer, img_url = fetch_pexels_image(article["image_search_query"])
     print(f"      Photographer: {photographer}")
 
-    # 5. Upload image to WordPress
+    # 5. Upload image
     print("\n[5/6] Uploading featured image to WordPress...")
     featured_id = upload_image(img_bytes, article["slug"], article["title"], photographer)
     print(f"      Media ID: {featured_id}")
@@ -408,7 +493,6 @@ def main():
     cat_ids = sync_categories(article.get("categories"))
     post = publish_post(article, featured_id, tag_ids, cat_ids, photographer)
 
-    # Summary
     print()
     print("=" * 62)
     print("  ARTICLE PUBLISHED SUCCESSFULLY!")
@@ -416,12 +500,9 @@ def main():
     print(f"  Title       : {post['title']['rendered']}")
     print(f"  URL         : {post['link']}")
     print(f"  Post ID     : {post['id']}")
+    print(f"  Topic source: {source}")
     print(f"  Image       : {img_url}")
     print(f"  Photographer: {photographer}")
-    if skipped:
-        print(f"\n  Skipped {len(skipped)} already-covered topic(s).")
-    remaining = len(TOPIC_POOL) - len(skipped) - 1
-    print(f"  Topics remaining in pool: {remaining}")
     print("=" * 62)
 
 
