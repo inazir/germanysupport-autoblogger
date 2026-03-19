@@ -1,0 +1,57 @@
+name: Translator — English to German
+
+on:
+  workflow_dispatch:            # Manual trigger
+    inputs:
+      limit:
+        description: "Number of articles to translate (leave empty for ALL)"
+        required: false
+        default: ""
+      post_id:
+        description: "Single Post ID to translate (leave empty for all)"
+        required: false
+        default: ""
+
+jobs:
+  translate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120        # 45 articles × ~2 min each
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install anthropic requests
+
+      - name: Translate all articles
+        if: ${{ github.event.inputs.limit == '' && github.event.inputs.post_id == '' }}
+        run: python translate_articles.py
+        env:
+          WP_URL:        ${{ secrets.WP_URL }}
+          WP_USER:       ${{ secrets.WP_USER }}
+          WP_APP_PASS:   ${{ secrets.WP_APP_PASS }}
+          ANTHROPIC_KEY: ${{ secrets.ANTHROPIC_KEY }}
+
+      - name: Translate limited articles
+        if: ${{ github.event.inputs.limit != '' && github.event.inputs.post_id == '' }}
+        run: python translate_articles.py --limit ${{ github.event.inputs.limit }}
+        env:
+          WP_URL:        ${{ secrets.WP_URL }}
+          WP_USER:       ${{ secrets.WP_USER }}
+          WP_APP_PASS:   ${{ secrets.WP_APP_PASS }}
+          ANTHROPIC_KEY: ${{ secrets.ANTHROPIC_KEY }}
+
+      - name: Translate single post
+        if: ${{ github.event.inputs.post_id != '' }}
+        run: python translate_articles.py --post-id ${{ github.event.inputs.post_id }}
+        env:
+          WP_URL:        ${{ secrets.WP_URL }}
+          WP_USER:       ${{ secrets.WP_USER }}
+          WP_APP_PASS:   ${{ secrets.WP_APP_PASS }}
+          ANTHROPIC_KEY: ${{ secrets.ANTHROPIC_KEY }}
