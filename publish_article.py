@@ -11,6 +11,11 @@ Topic strategy:
   2. If all seed topics are covered, ask Claude to generate 20 fresh topics
      based on what's already published — so it never repeats and always
      finds new angles. This repeats forever.
+
+Category strategy:
+  Claude must pick from ALLOWED_CATEGORIES only. The script then looks up
+  the matching WordPress category ID and assigns it. No new categories are
+  ever created — only existing ones are used.
 """
 
 import os
@@ -32,6 +37,44 @@ WP_USER       = os.environ["WP_USER"]
 WP_APP_PASS   = os.environ["WP_APP_PASS"]
 ANTHROPIC_KEY = os.environ["ANTHROPIC_KEY"]
 PEXELS_KEY    = os.environ["PEXELS_KEY"]
+
+# ============================================================
+#  📂  ALLOWED CATEGORIES
+#  Claude must pick from this list — no new categories are created.
+#  Keep this in sync with your WordPress category list.
+# ============================================================
+ALLOWED_CATEGORIES = [
+    "Best Deals",
+    "Bureaucracy",
+    "Car Rental and Driving",
+    "Cost of Living",
+    "Culture and Integration",
+    "Emergency Services",
+    "Employment and Careers",
+    "Family & Children",
+    "Family and Education",
+    "Finance",
+    "Finance and Banking",
+    "Food and Restaurants",
+    "German Language Learning",
+    "Healthcare System",
+    "Housing",
+    "Immigrant Success Stories",
+    "Immigration",
+    "Insurance",
+    "Living in Germany",
+    "Public Transportation",
+    "Relocation and Moving",
+    "Residency and Citizenship",
+    "Retirement in Germany",
+    "Shopping and Discounts",
+    "Student Life in Germany",
+    "Tax",
+    "Technology and Internet",
+    "Travel and Tourism",
+    "Utilities",
+    "Working Freelance",
+]
 
 # ============================================================
 #  📌  AFFILIATE / REFERRAL LINKS
@@ -166,6 +209,84 @@ def fetch_all_post_titles():
     return titles
 
 
+def fetch_wp_categories():
+    """
+    Fetch all categories from WordPress and return a dict of
+    {category_name_lowercase: category_id}.
+    Handles pagination in case there are many categories.
+    """
+    cat_map = {}
+    page = 1
+    while True:
+        r = requests.get(
+            f"{WP_URL}/wp-json/wp/v2/categories",
+            headers=HEADERS,
+            params={"per_page": 100, "page": page, "_fields": "id,name"},
+        )
+        if r.status_code == 400:
+            break
+        r.raise_for_status()
+        batch = r.json()
+        if not batch:
+            break
+        for cat in batch:
+            cat_map[cat["name"].lower()] = cat["id"]
+        total_pages = int(r.headers.get("X-WP-TotalPages", 1))
+        if page >= total_pages:
+            break
+        page += 1
+    return cat_map
+
+
+def resolve_category_ids(chosen_categories, wp_cat_map):
+    """
+    Match Claude's chosen category names against WordPress categories.
+    - Tries exact match first (case-insensitive).
+    - Falls back to fuzzy match if no exact match found.
+    - Skips any category that can't be matched (logs a warning).
+    - Falls back to 'Living in Germany' if nothing matches at all.
+    Returns a list of WordPress category IDs.
+    """
+    ids = []
+    for name in chosen_categories:
+        name_lower = name.lower()
+
+        # 1. Exact match (case-insensitive)
+        if name_lower in wp_cat_map:
+            ids.append(wp_cat_map[name_lower])
+            print(f"      Category matched (exact): '{name}'")
+            continue
+
+        # 2. Fuzzy match — find the closest ALLOWED_CATEGORIES entry
+        best_score = 0
+        best_key   = None
+        for wp_name_lower, wp_id in wp_cat_map.items():
+            score = SequenceMatcher(None, name_lower, wp_name_lower).ratio()
+            if score > best_score:
+                best_score = score
+                best_key   = wp_name_lower
+
+        if best_key and best_score >= 0.60:
+            ids.append(wp_cat_map[best_key])
+            print(f"      Category matched (fuzzy {best_score:.0%}): '{name}' → '{best_key}'")
+        else:
+            print(f"      WARNING: Could not match category '{name}' — skipping.")
+
+    # Fallback if nothing matched at all
+    if not ids:
+        fallback = "living in germany"
+        if fallback in wp_cat_map:
+            ids.append(wp_cat_map[fallback])
+            print(f"      Category fallback used: 'Living in Germany'")
+        else:
+            # Last resort: use the first available category
+            first_id = next(iter(wp_cat_map.values()))
+            ids.append(first_id)
+            print(f"      Category fallback used: first available category (ID {first_id})")
+
+    return ids
+
+
 def similarity(a, b):
     return SequenceMatcher(None, a.lower(), b.lower()).ratio()
 
@@ -205,8 +326,6 @@ def generate_new_topics(existing_titles, count=20):
     Returns a list of topic strings.
     """
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-
-    # Send a sample of existing titles so Claude avoids repeating them
     sample = existing_titles[:80]
     existing_str = "\n".join(f"- {t}" for t in sample)
 
@@ -251,16 +370,10 @@ Example: ["Topic one here", "Topic two here", ...]
 
 def pick_fresh_topic(existing_titles):
     """
-    Full topic-picking strategy:
-      Phase 1 — Try the seed pool.
-      Phase 2 — If seeds exhausted, generate new topics with Claude and try those.
-                 Repeats up to 5 times (= up to 100 AI-generated ideas per run).
-                 Effectively infinite — the site would need thousands of posts
-                 on the same niche before this ever truly fails.
-
-    Returns (chosen_topic, source) where source is 'seed' or 'ai-generated'.
+    Phase 1 — Try seed pool.
+    Phase 2 — Generate new topics with Claude (repeats forever).
+    Returns (chosen_topic, source).
     """
-    # Phase 1: seed pool
     print("  Checking seed topic pool...")
     topic, skipped = pick_from_pool(SEED_TOPICS, existing_titles)
     if topic:
@@ -268,9 +381,8 @@ def pick_fresh_topic(existing_titles):
         return topic, "seed"
 
     print(f"  All {len(SEED_TOPICS)} seed topics are already covered.")
-    print("  Switching to AI-generated topics (this runs forever)...")
+    print("  Switching to AI-generated topics...")
 
-    # Phase 2: AI generation loop
     max_attempts = 5
     for attempt in range(1, max_attempts + 1):
         print(f"  AI topic generation attempt {attempt}/{max_attempts}...")
@@ -281,17 +393,17 @@ def pick_fresh_topic(existing_titles):
             return topic, "ai-generated"
         print("  All generated topics overlapped existing posts. Retrying...")
 
-    # Should essentially never happen for a niche site
-    print("ERROR: Could not find a fresh topic after AI generation. Add more niche angles.")
+    print("ERROR: Could not find a fresh topic after AI generation attempts.")
     sys.exit(1)
 
 
 def generate_article(topic):
     """Call Claude API and return parsed article dict."""
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-    links_str = "\n".join([f"- {name}: {url}" for name, url in REFERRAL_LINKS.items()])
+    links_str      = "\n".join([f"- {name}: {url}" for name, url in REFERRAL_LINKS.items()])
+    categories_str = "\n".join(f"- {c}" for c in ALLOWED_CATEGORIES)
 
-    system_prompt = """
+    system_prompt = f"""
 You are an expert SEO content writer specialising in practical guides for expats living in Germany.
 Your articles are:
 - Comprehensive (1200-1800 words)
@@ -304,17 +416,26 @@ Your articles are:
 - Containing naturally placed referral/affiliate links from the provided list
   (HTML <a> tags, target=_blank, rel=nofollow) — only embed where directly relevant
 
+CATEGORY RULES (very important):
+- You MUST assign 1 or 2 categories from the list below — no others.
+- Do NOT invent new category names. Only use names exactly as written below.
+- Pick the most relevant category first; add a second only if the article
+  clearly spans two topics (e.g. a tax+freelance article → ["Tax", "Working Freelance"]).
+
+Allowed categories:
+{categories_str}
+
 Output ONLY valid JSON in this exact format, no markdown fences, no extra text:
-{
+{{
   "title": "Article title",
   "slug": "url-friendly-slug",
   "meta_description": "155-char meta description",
   "focus_keyword": "main SEO keyword",
   "tags": ["tag1", "tag2"],
-  "categories": ["Category Name"],
+  "categories": ["Exact Category Name"],
   "image_search_query": "pexels search term (2-4 words)",
   "content": "Full HTML article body using <h2>, <h3>, <p>, <ul>, <li>, <a> tags"
-}
+}}
 """
 
     user_prompt = f"""
@@ -388,6 +509,7 @@ def upload_image(img_bytes, slug, title, photographer):
 
 
 def sync_tags(tag_names):
+    """Create or find tags, return list of IDs."""
     tag_ids = []
     for name in tag_names:
         try:
@@ -404,24 +526,8 @@ def sync_tags(tag_names):
     return tag_ids
 
 
-def sync_categories(cat_names):
-    cat_ids = []
-    for name in (cat_names or ["Expat Guide"]):
-        try:
-            c = wp_request("POST", "categories", json={"name": name})
-            cat_ids.append(c["id"])
-        except Exception:
-            search = requests.get(
-                f"{WP_URL}/wp-json/wp/v2/categories",
-                headers=HEADERS,
-                params={"search": name, "per_page": 1},
-            ).json()
-            if search:
-                cat_ids.append(search[0]["id"])
-    return cat_ids
-
-
-def publish_post(article, featured_id, tag_ids, cat_ids, photographer):
+def publish_post(article, featured_id, cat_ids, tag_ids, photographer):
+    """Create and publish the WordPress post."""
     footer = (
         f'<hr/><p><em>Featured image by <strong>{photographer}</strong> via '
         f'<a href="https://www.pexels.com" target="_blank" rel="nofollow">Pexels</a>.</em></p>'
@@ -458,40 +564,47 @@ def main():
     print("=" * 62)
 
     # 1. Fetch existing posts
-    print("\n[1/6] Fetching existing posts from WordPress...")
+    print("\n[1/7] Fetching existing posts from WordPress...")
     existing_titles = fetch_all_post_titles()
     print(f"      Found {len(existing_titles)} published posts.")
 
-    # 2. Pick a fresh topic (seed pool → AI-generated, forever)
-    print("\n[2/6] Picking an uncovered topic...")
+    # 2. Fetch WordPress categories (live from site)
+    print("\n[2/7] Fetching categories from WordPress...")
+    wp_cat_map = fetch_wp_categories()
+    print(f"      Found {len(wp_cat_map)} categories on site.")
+
+    # 3. Pick a fresh topic
+    print("\n[3/7] Picking an uncovered topic...")
     chosen_topic, source = pick_fresh_topic(existing_titles)
     print(f"      Source : {source}")
     print(f"      Topic  : {chosen_topic}")
 
-    # 3. Generate article with Claude
-    print("\n[3/6] Generating article with Claude...")
+    # 4. Generate article with Claude
+    print("\n[4/7] Generating article with Claude...")
     article = generate_article(chosen_topic)
-    print(f"      Title    : {article['title']}")
-    print(f"      Slug     : {article['slug']}")
-    print(f"      Focus KW : {article['focus_keyword']}")
-    print(f"      Tags     : {', '.join(article['tags'][:5])} ...")
-    print(f"      Words    : ~{len(article['content'].split())}")
+    print(f"      Title      : {article['title']}")
+    print(f"      Slug       : {article['slug']}")
+    print(f"      Focus KW   : {article['focus_keyword']}")
+    print(f"      Categories : {article['categories']}")
+    print(f"      Tags       : {', '.join(article['tags'][:5])} ...")
+    print(f"      Words      : ~{len(article['content'].split())}")
 
-    # 4. Fetch featured image
-    print(f"\n[4/6] Fetching image from Pexels: '{article['image_search_query']}'...")
+    # 5. Resolve category IDs from WordPress (no new categories created)
+    print("\n[5/7] Resolving category IDs...")
+    cat_ids = resolve_category_ids(article["categories"], wp_cat_map)
+    print(f"      Resolved IDs: {cat_ids}")
+
+    # 6. Fetch and upload featured image
+    print(f"\n[6/7] Fetching image from Pexels: '{article['image_search_query']}'...")
     img_bytes, photographer, img_url = fetch_pexels_image(article["image_search_query"])
     print(f"      Photographer: {photographer}")
-
-    # 5. Upload image
-    print("\n[5/6] Uploading featured image to WordPress...")
     featured_id = upload_image(img_bytes, article["slug"], article["title"], photographer)
     print(f"      Media ID: {featured_id}")
 
-    # 6. Publish post
-    print("\n[6/6] Publishing post to WordPress...")
+    # 7. Sync tags and publish
+    print("\n[7/7] Publishing post to WordPress...")
     tag_ids = sync_tags(article["tags"])
-    cat_ids = sync_categories(article.get("categories"))
-    post = publish_post(article, featured_id, tag_ids, cat_ids, photographer)
+    post = publish_post(article, featured_id, cat_ids, tag_ids, photographer)
 
     print()
     print("=" * 62)
@@ -501,6 +614,7 @@ def main():
     print(f"  URL         : {post['link']}")
     print(f"  Post ID     : {post['id']}")
     print(f"  Topic source: {source}")
+    print(f"  Categories  : {article['categories']} → IDs {cat_ids}")
     print(f"  Image       : {img_url}")
     print(f"  Photographer: {photographer}")
     print("=" * 62)
