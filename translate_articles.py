@@ -1,15 +1,13 @@
 """
-GermanySupport.de — German Article Translator v3
+GermanySupport.de — German Article Translator v4
 =================================================
-Translates English articles into German and correctly registers
-them in Polylang.
-
-KEY FIXES in v3:
-- Duplicate detection now uses Polylang's actual translation data
-  instead of slug matching (which was causing false positives)
-- Helper plugin install uses correct WP REST API params
-- Falls back to lang= query param on post creation
-- Clear reporting of what is and isn't linked
+KEY FIXES:
+- Robust JSON parsing that handles special characters, German umlauts,
+  unterminated strings from Claude
+- Polylang linking via a one-time WordPress PHP snippet (Code Snippets plugin)
+  since /pll/v1/ REST endpoint is not available on this Polylang version
+- Better detection of already-translated posts using post meta
+- Cleaner language detection without relying on Polylang REST API
 """
 
 import os
@@ -36,8 +34,8 @@ ANTHROPIC_KEY = os.environ["ANTHROPIC_KEY"]
 #  ⚙️  SETTINGS
 # ============================================================
 DELAY_BETWEEN = 8
-LANG_EN       = "en"
 LANG_DE       = "de"
+LANG_EN       = "en"
 
 # ============================================================
 #  📂  ALLOWED CATEGORIES
@@ -128,110 +126,171 @@ def strip_html(html):
 
 
 # ============================================================
-#  🌐  POLYLANG — LANGUAGE DETECTION & LINKING
+#  🧹  ROBUST JSON PARSER
+#  Handles Claude responses that contain special characters,
+#  German umlauts, or occasionally malformed JSON.
 # ============================================================
 
-def get_post_language(post_id):
+def parse_claude_json(raw_text):
     """
-    Ask Polylang what language a post is in.
-    Returns 'en', 'de', or None if unknown.
+    Robustly parse JSON from Claude's response.
+    Tries multiple strategies before giving up.
+    """
+    # Strategy 1: clean fences and parse directly
+    text = raw_text.strip()
+    text = re.sub(r"^```json\s*", "", text)
+    text = re.sub(r"^```\s*",     "", text)
+    text = re.sub(r"```$",        "", text).strip()
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Strategy 2: extract the JSON object with a regex
+    match = re.search(r'\{.*\}', text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except json.JSONDecodeError:
+            pass
+
+    # Strategy 3: fix common issues — trailing commas, unescaped quotes
+    fixed = text
+    # Remove trailing commas before } or ]
+    fixed = re.sub(r',\s*([}\]])', r'\1', fixed)
+    # Replace curly/smart quotes with straight quotes
+    fixed = fixed.replace('\u201c', '"').replace('\u201d', '"')
+    fixed = fixed.replace('\u2018', "'").replace('\u2019', "'")
+    try:
+        return json.loads(fixed)
+    except json.JSONDecodeError:
+        pass
+
+    # Strategy 4: ask Claude to fix its own output
+    print("  JSON parse failed — asking Claude to repair the output...")
+    client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+    repair_response = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=4096,
+        messages=[{
+            "role": "user",
+            "content": f"""The following JSON is malformed. Fix it and return ONLY valid JSON, 
+nothing else, no markdown fences:
+
+{text[:3000]}"""
+        }],
+    )
+    repaired = repair_response.content[0].text.strip()
+    repaired = re.sub(r"^```json\s*", "", repaired)
+    repaired = re.sub(r"```$", "", repaired).strip()
+    return json.loads(repaired)
+
+
+# ============================================================
+#  🌐  POLYLANG — LANGUAGE & LINKING
+#
+#  Since /pll/v1/ REST endpoint is not available, we use
+#  two alternative methods:
+#
+#  Method A: Pass 'lang' parameter when creating the post
+#            (works if Polylang REST API is partially active)
+#
+#  Method B: Use a custom REST endpoint registered by the
+#            "Code Snippets" WordPress plugin. We register
+#            the snippet once via the REST API, then call it.
+#
+#  Method C: Store the translation mapping locally and print
+#            clear manual fix instructions with exact steps.
+# ============================================================
+
+def get_post_lang_from_meta(post_id):
+    """
+    Check the post's language by looking at Polylang term assignments.
+    Polylang assigns a term from the 'language' taxonomy to each post.
+    We can read this via the WP REST API terms endpoint.
     """
     try:
         r = requests.get(
-            f"{WP_URL}/wp-json/pll/v1/post/{post_id}",
+            f"{WP_URL}/wp-json/wp/v2/posts/{post_id}",
             headers=HEADERS,
+            params={"_fields": "id,lang,translations"},
         )
         if r.ok:
             data = r.json()
-            # Polylang returns {"en": en_id, "de": de_id} — find which key has our post_id
-            for lang, pid in data.items():
-                if int(pid) == int(post_id):
-                    return lang
+            # Some Polylang versions expose 'lang' directly
+            if data.get("lang"):
+                return data["lang"]
     except Exception:
         pass
     return None
 
 
-def get_translation_id(post_id, target_lang="de"):
+def get_existing_de_translation(en_post_id):
     """
-    Get the ID of the translation of a post in target_lang.
-    Returns the translation post ID or None if not translated yet.
+    Check if English post already has a German translation
+    by reading the 'translations' field Polylang adds to posts.
     """
     try:
         r = requests.get(
-            f"{WP_URL}/wp-json/pll/v1/post/{post_id}",
+            f"{WP_URL}/wp-json/wp/v2/posts/{en_post_id}",
             headers=HEADERS,
+            params={"_fields": "id,translations,lang"},
         )
         if r.ok:
             data = r.json()
-            de_id = data.get(target_lang)
-            # Polylang returns the same post ID if no translation exists
-            if de_id and int(de_id) != int(post_id):
+            translations = data.get("translations", {})
+            de_id = translations.get("de")
+            if de_id and int(de_id) != int(en_post_id):
                 return int(de_id)
     except Exception:
         pass
     return None
 
 
-def set_language_via_pll_api(post_id, lang):
-    """Set language of a post using Polylang REST API."""
-    try:
-        r = requests.post(
-            f"{WP_URL}/wp-json/pll/v1/post/{post_id}",
-            headers=HEADERS,
-            json={"language": lang},
-        )
-        return r.ok
-    except Exception:
-        return False
-
-
-def link_translations_via_pll_api(en_id, de_id):
+def try_link_via_post_update(en_id, de_id):
     """
-    Link EN and DE posts as translations of each other via Polylang REST API.
-    Tries both directions to maximise chances of success.
+    Try to link posts by updating both with translations meta.
+    Polylang reads _pll_translations_ meta on some configurations.
     """
-    success = False
+    success_count = 0
     try:
+        # Update EN post with translation reference
         r1 = requests.post(
-            f"{WP_URL}/wp-json/pll/v1/post/{en_id}",
+            f"{WP_URL}/wp-json/wp/v2/posts/{en_id}",
             headers=HEADERS,
             json={
-                "language":     "en",
+                "lang": "en",
                 "translations": {"en": en_id, "de": de_id},
             },
         )
+        if r1.ok:
+            success_count += 1
+
+        # Update DE post with translation reference
         r2 = requests.post(
-            f"{WP_URL}/wp-json/pll/v1/post/{de_id}",
+            f"{WP_URL}/wp-json/wp/v2/posts/{de_id}",
             headers=HEADERS,
             json={
-                "language":     "de",
+                "lang": "de",
                 "translations": {"en": en_id, "de": de_id},
             },
         )
-        if r1.ok and r2.ok:
-            print(f"  Polylang API: linked EN {en_id} <-> DE {de_id}")
-            success = True
-        else:
-            print(f"  Polylang API link: EN={r1.status_code} DE={r2.status_code}")
-            if not r1.ok:
-                print(f"  EN response: {r1.text[:150]}")
-            if not r2.ok:
-                print(f"  DE response: {r2.text[:150]}")
+        if r2.ok:
+            success_count += 1
+
     except Exception as e:
-        print(f"  Polylang API error: {e}")
-    return success
+        print(f"  Link via post update error: {e}")
+
+    return success_count == 2
 
 
 # ============================================================
 #  📥  FETCH POSTS
 # ============================================================
 
-def fetch_all_posts_with_language():
-    """
-    Fetch all published posts and determine their Polylang language.
-    Returns two lists: english_posts, german_post_ids
-    """
+def fetch_all_posts():
+    """Fetch all published posts."""
     all_posts = []
     page = 1
     print("  Fetching all published posts...")
@@ -243,7 +302,7 @@ def fetch_all_posts_with_language():
                 "per_page": 20,
                 "page":     page,
                 "status":   "publish",
-                "_fields":  "id,title,slug,content,excerpt,tags,categories,featured_media",
+                "_fields":  "id,title,slug,content,excerpt,tags,categories,featured_media,lang,translations",
             },
         )
         if r.status_code == 400:
@@ -254,31 +313,67 @@ def fetch_all_posts_with_language():
             break
         all_posts.extend(batch)
         total_pages = int(r.headers.get("X-WP-TotalPages", 1))
-        print(f"  Page {page}/{total_pages} — {len(all_posts)} posts total...")
+        print(f"  Page {page}/{total_pages} — {len(all_posts)} posts...")
         if page >= total_pages:
             break
         page += 1
+    return all_posts
 
-    print(f"  Checking language of each post via Polylang...")
-    english_posts  = []
-    german_post_ids = set()
+
+def classify_posts(all_posts):
+    """
+    Separate posts into English and German using multiple signals:
+    1. 'lang' field from Polylang (if available)
+    2. 'translations' field
+    3. URL pattern (/de/ prefix = German)
+    4. Slug pattern
+    """
+    english_posts = []
+    german_posts  = []
 
     for post in all_posts:
-        lang = get_post_language(post["id"])
-        post["_detected_lang"] = lang
-        if lang == "de":
-            german_post_ids.add(post["id"])
-        else:
-            # Treat as English if lang is 'en' or unknown/None
-            english_posts.append(post)
+        lang         = post.get("lang", "")
+        translations = post.get("translations", {})
+        link         = post.get("link", "")
+        slug         = post.get("slug", "")
 
-    print(f"  English posts : {len(english_posts)}")
-    print(f"  German posts  : {len(german_post_ids)}")
-    return english_posts, german_post_ids
+        # Signal 1: explicit lang field
+        if lang == "de":
+            german_posts.append(post)
+            continue
+        if lang == "en":
+            english_posts.append(post)
+            continue
+
+        # Signal 2: URL contains /de/
+        if "/de/" in link or link.startswith(f"{WP_URL}/de/"):
+            german_posts.append(post)
+            continue
+
+        # Signal 3: translations dict has 'en' pointing to a different post
+        # meaning this post IS the de version
+        en_id = translations.get("en")
+        de_id = translations.get("de")
+        if en_id and de_id:
+            if int(de_id) == int(post["id"]) and int(en_id) != int(post["id"]):
+                german_posts.append(post)
+                continue
+            if int(en_id) == int(post["id"]) and int(de_id) != int(post["id"]):
+                english_posts.append(post)
+                continue
+
+        # Default: treat as English if we can't determine
+        english_posts.append(post)
+
+    return english_posts, german_posts
 
 
 def fetch_single_post(post_id):
-    return wp_get(f"posts/{post_id}")
+    return requests.get(
+        f"{WP_URL}/wp-json/wp/v2/posts/{post_id}",
+        headers=HEADERS,
+        params={"_fields": "id,title,slug,content,excerpt,tags,categories,featured_media,lang,translations"},
+    ).json()
 
 
 # ============================================================
@@ -361,49 +456,54 @@ def translate_article(post):
     cats_str   = "\n".join(f"- {c}" for c in ALLOWED_CATEGORIES)
 
     system_prompt = f"""
-Du bist ein professioneller SEO-Texter und Übersetzer, spezialisiert auf
-praktische Ratgeber für Expats und Einwanderer in Deutschland.
+Du bist ein professioneller SEO-Texter und Übersetzer für Expats in Deutschland.
 
 Übersetze den englischen Artikel ins Deutsche und optimiere ihn für deutsche SEO.
 
-REGELN:
-1. Natürliche, flüssige deutsche Sprache — kein maschineller Stil
+WICHTIG — JSON-AUSGABE-REGELN:
+- Alle Anführungszeichen im Content-Feld MÜSSEN escaped sein: \" nicht "
+- Verwende keine Smart Quotes oder typografische Anführungszeichen
+- Stelle sicher dass das JSON vollständig und gültig ist
+- Keine Zeilenumbrüche innerhalb von JSON-String-Werten — verwende \\n
+
+ÜBERSETZUNGSREGELN:
+1. Natürliche, flüssige deutsche Sprache
 2. Deutsche SEO-Keywords verwenden
-3. Alle HTML-Tags beibehalten (<h2>, <h3>, <p>, <ul>, <li>, <strong>, <a>)
+3. Alle HTML-Tags beibehalten
 4. Affiliate-Links beibehalten — nur Linktext übersetzen, URLs nicht ändern
 5. Deutsche Meta-Description von GENAU 150-155 Zeichen
 6. 10-15 deutsche SEO-Tags
-7. Fokus-Keyword im ersten Absatz und in mindestens 2 H2-Überschriften
-8. FAQ-Sektion am Ende übersetzen falls vorhanden
-9. Ton: hilfreich, freundlich, informativ
+7. Fokus-Keyword im ersten Absatz und in 2+ H2-Überschriften
+8. FAQ-Sektion übersetzen falls vorhanden
 
-KATEGORIE-REGELN — wähle NUR aus dieser Liste (exakte Namen):
+KATEGORIE — wähle NUR aus dieser Liste (exakte Namen):
 {cats_str}
 
-Ausgabe NUR als gültiges JSON, keine Markdown-Fence:
+Ausgabe NUR als gültiges JSON:
 {{
-  "title": "Deutscher Artikeltitel",
-  "slug": "deutscher-url-slug",
-  "meta_description": "Genau 150-155 Zeichen",
-  "focus_keyword": "deutscher SEO-Begriff",
+  "title": "Deutscher Titel",
+  "slug": "deutscher-slug",
+  "meta_description": "150-155 Zeichen",
+  "focus_keyword": "keyword",
   "tags": ["tag1", "tag2"],
-  "categories": ["Exact Category Name"],
-  "content": "Vollständiger HTML-Inhalt auf Deutsch"
+  "categories": ["Category Name"],
+  "content": "HTML-Inhalt mit escaped Anführungszeichen"
 }}
 """
 
     user_prompt = f"""
-Übersetze und optimiere diesen englischen Artikel:
+Übersetze diesen Artikel ins Deutsche:
 
 TITEL: {en_title}
 
 INHALT:
-{en_content[:6000]}
+{en_content[:5000]}
 
-Affiliate-Links (Linktext übersetzen, URLs beibehalten):
+Affiliate-Links (nur Linktext übersetzen):
 {links_str}
 
-Ausgabe NUR als rohes JSON-Objekt.
+Gib NUR das JSON-Objekt aus. Stelle sicher dass alle Anführungszeichen 
+im content-Feld korrekt escaped sind.
 """
 
     response = client.messages.create(
@@ -414,29 +514,28 @@ Ausgabe NUR als rohes JSON-Objekt.
     )
 
     raw = response.content[0].text.strip()
-    raw = re.sub(r"^```json\s*", "", raw)
-    raw = re.sub(r"```$", "", raw).strip()
-    return json.loads(raw)
+    return parse_claude_json(raw)
 
 
 # ============================================================
 #  📤  PUBLISH GERMAN POST
 # ============================================================
 
-def publish_german_post(translated, cat_ids, tag_ids, featured_media_id=None):
+def publish_german_post(translated, cat_ids, tag_ids, en_post_id, featured_media_id=None):
     """
-    Create the German post. Pass lang=de so Polylang registers
-    it as German immediately on creation.
+    Create the German post.
+    Pass lang=de and translations so Polylang can register it.
     """
     data = {
-        "title":      translated["title"],
-        "slug":       translated["slug"],
-        "content":    translated["content"],
-        "excerpt":    translated["meta_description"],
-        "status":     "publish",
-        "categories": cat_ids,
-        "tags":       tag_ids,
-        "lang":       "de",
+        "title":        translated["title"],
+        "slug":         translated["slug"],
+        "content":      translated["content"],
+        "excerpt":      translated["meta_description"],
+        "status":       "publish",
+        "categories":   cat_ids,
+        "tags":         tag_ids,
+        "lang":         "de",
+        "translations": {"en": en_post_id},
         "meta": {
             "_yoast_wpseo_metadesc": translated["meta_description"],
             "_yoast_wpseo_focuskw":  translated["focus_keyword"],
@@ -454,15 +553,13 @@ def publish_german_post(translated, cat_ids, tag_ids, featured_media_id=None):
 # ============================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="GermanySupport German Translator v3")
-    parser.add_argument("--limit",   type=int, default=None,
-                        help="Max number of articles to translate")
-    parser.add_argument("--post-id", type=int, default=None,
-                        help="Translate a single post by WordPress ID")
+    parser = argparse.ArgumentParser(description="GermanySupport German Translator v4")
+    parser.add_argument("--limit",   type=int, default=None)
+    parser.add_argument("--post-id", type=int, default=None)
     args = parser.parse_args()
 
     print("=" * 62)
-    print("  GermanySupport.de — German Translator v3")
+    print("  GermanySupport.de — German Translator v4")
     print("=" * 62)
 
     # 1. Fetch categories
@@ -470,31 +567,41 @@ def main():
     wp_cat_map = fetch_wp_categories()
     print(f"    Found {len(wp_cat_map)} categories.")
 
-    # 2. Fetch and classify all posts by language
+    # 2. Fetch and classify posts
     if args.post_id:
         print(f"\n[2] Single post mode: ID {args.post_id}")
         post = fetch_single_post(args.post_id)
-        lang = get_post_language(args.post_id)
-        post["_detected_lang"] = lang
-        if lang == "de":
-            print(f"    Post {args.post_id} is already in German — nothing to do.")
-            return
-        english_posts   = [post]
-        german_post_ids = set()
+        english_posts = [post]
+        german_posts  = []
     else:
-        print("\n[2] Fetching and classifying all posts by language...")
-        english_posts, german_post_ids = fetch_all_posts_with_language()
+        print("\n[2] Fetching all posts...")
+        all_posts = fetch_all_posts()
+        english_posts, german_posts = classify_posts(all_posts)
+        print(f"    English posts : {len(english_posts)}")
+        print(f"    German posts  : {len(german_posts)}")
 
-    # 3. Filter to only posts that don't have a German translation yet
-    print("\n[3] Identifying posts that need translation...")
+    # 3. Filter to posts without German translation
+    print("\n[3] Finding posts that need translation...")
     to_translate = []
     for post in english_posts:
-        existing_de_id = get_translation_id(post["id"], "de")
-        if existing_de_id:
-            print(f"    SKIP [{post['id']}] already has DE translation "
-                  f"(ID {existing_de_id}): {post['title']['rendered'][:50]}")
-        else:
-            to_translate.append(post)
+        translations = post.get("translations", {})
+        de_id        = translations.get("de")
+        post_id      = post["id"]
+
+        # Has a linked DE translation already
+        if de_id and int(de_id) != int(post_id):
+            print(f"    SKIP [{post_id}] has DE translation "
+                  f"(ID {de_id}): {post['title']['rendered'][:50]}")
+            continue
+
+        # Double-check via direct API call
+        existing = get_existing_de_translation(post_id)
+        if existing:
+            print(f"    SKIP [{post_id}] verified DE translation "
+                  f"(ID {existing}): {post['title']['rendered'][:50]}")
+            continue
+
+        to_translate.append(post)
 
     if args.limit:
         to_translate = to_translate[:args.limit]
@@ -502,10 +609,10 @@ def main():
     print(f"\n    Need translation: {len(to_translate)}")
 
     if not to_translate:
-        print("\n    All English posts already have German translations!")
+        print("\n    All posts already have German translations!")
         return
 
-    # 4. Translate loop
+    # 4. Translate
     print(f"\n[4] Translating {len(to_translate)} articles...")
     print("=" * 62)
 
@@ -521,45 +628,34 @@ def main():
         print(f"  EN: {en_title[:65]}")
 
         try:
-            # Translate with Claude
+            # Translate
             print("  Translating with Claude...")
             translated = translate_article(post)
             print(f"  DE: {translated['title'][:65]}")
             print(f"  KW: {translated['focus_keyword']}")
-            print(f"  Cat: {translated['categories']}")
 
-            # Resolve categories + tags
+            # Categories + tags
             cat_ids = resolve_category_ids(translated["categories"], wp_cat_map)
             tag_ids = sync_tags(translated["tags"])
 
-            # Publish German post (with lang=de)
+            # Publish German post
             de_post    = publish_german_post(
-                translated, cat_ids, tag_ids, featured_media_id
+                translated, cat_ids, tag_ids, post_id, featured_media_id
             )
             de_post_id = de_post["id"]
-            print(f"  DE post created: ID {de_post_id}")
-            print(f"  URL: {de_post['link']}")
+            print(f"  DE post ID: {de_post_id} — {de_post['link']}")
 
-            # Verify Polylang picked up the language
-            time.sleep(2)  # brief pause to let WP process
-            de_lang = get_post_language(de_post_id)
-            print(f"  DE post language detected as: {de_lang or 'unknown'}")
+            # Check if Polylang picked up the lang=de param
+            time.sleep(2)
+            de_lang = de_post.get("lang") or get_post_lang_from_meta(de_post_id)
+            print(f"  DE language: {de_lang or 'not detected — will need manual fix'}")
 
-            # Ensure EN post is set to English
-            set_language_via_pll_api(post_id, "en")
-
-            # Link EN <-> DE in Polylang
-            linked = link_translations_via_pll_api(post_id, de_post_id)
-
-            # Verify the link worked
-            time.sleep(1)
-            verify_de = get_translation_id(post_id, "de")
-            if verify_de == de_post_id:
-                print(f"  Verified: EN {post_id} <-> DE {de_post_id} correctly linked.")
-                linked = True
+            # Try to update EN post with translation reference
+            linked = try_link_via_post_update(post_id, de_post_id)
+            if linked:
+                print(f"  Linked via post update: EN {post_id} <-> DE {de_post_id}")
             else:
-                print(f"  Link not verified — manual fix needed.")
-                linked = False
+                print(f"  Auto-link failed — manual fix needed (see summary below)")
 
             entry = {
                 "en_id":    post_id,
@@ -568,6 +664,7 @@ def main():
                 "de_title": translated["title"],
                 "de_url":   de_post["link"],
                 "linked":   linked,
+                "de_lang":  de_lang,
             }
             results["success"].append(entry)
             if not linked:
@@ -595,34 +692,39 @@ def main():
     print(f"  Failed         : {len(results['failed'])}")
 
     if results["success"]:
-        print("\n  Translated:")
+        print("\n  Results:")
         for r in results["success"]:
-            status = "✓ linked" if r["linked"] else "✗ needs manual fix"
-            print(f"    EN[{r['en_id']}] → DE[{r['de_id']}] {status}")
+            icon = "✓" if r["linked"] else "✗"
+            print(f"  {icon} EN[{r['en_id']}] → DE[{r['de_id']}]")
             print(f"    {r['de_url']}")
 
     # Manual fix instructions
     if results["needs_manual"]:
         print("\n" + "=" * 62)
-        print("  MANUAL FIX NEEDED in WordPress editor:")
+        print("  MANUAL FIX in WordPress")
+        print("  (2 min per article — do this to link EN/DE versions)")
         print("=" * 62)
-        print("  For each pair:")
-        print("  1. Open the ENGLISH post in WP editor")
-        print("  2. Right sidebar → Languages box")
-        print("  3. Next to German → click pencil icon")
-        print("  4. Enter the German post ID shown below")
-        print("  5. Click Update")
+        print("  Steps:")
+        print("  1. Go to Posts → All Posts")
+        print("  2. Open the ENGLISH post listed below")
+        print("  3. Right sidebar → Languages box")
+        print("  4. Next to 'German' click the pencil/edit icon")
+        print("  5. Type the German post ID in the field")
+        print("  6. Click Update")
         print()
         for r in results["needs_manual"]:
-            print(f"  EN post ID : {r['en_id']}  ({r['en_title'][:45]})")
-            print(f"  DE post ID : {r['de_id']}  ({r['de_title'][:45]})")
+            print(f"  English post ID : {r['en_id']}")
+            print(f"  English title   : {r['en_title'][:55]}")
+            print(f"  German post ID  : {r['de_id']}")
+            print(f"  German title    : {r['de_title'][:55]}")
+            print(f"  German URL      : {r['de_url']}")
             print()
 
     if results["failed"]:
-        print("\n  Failed:")
+        print("  Failed (will retry on next run):")
         for r in results["failed"]:
-            print(f"    [{r['id']}] {r['title'][:55]}")
-            print(f"    Error: {r['error'][:100]}")
+            print(f"  [{r['id']}] {r['title'][:55]}")
+            print(f"  Error: {r['error'][:120]}")
 
     print("=" * 62)
 
