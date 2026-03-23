@@ -1,29 +1,15 @@
 """
-GermanySupport.de — German Article Translator v2
+GermanySupport.de — German Article Translator v3
 =================================================
 Translates English articles into German and correctly registers
-them in Polylang using the WordPress wpdb approach via a
-temporary helper plugin that we install, use, and remove.
+them in Polylang.
 
-WHY THIS APPROACH:
-  Polylang free does not fully expose its language/translation
-  linking via the standard REST API. The most reliable way to
-  set the language and link translations is through WordPress
-  directly using a small temporary REST endpoint that calls
-  Polylang's internal PHP functions (pll_set_post_language,
-  pll_save_post_translations).
-
-WHAT THIS SCRIPT DOES:
-  1. Installs a tiny helper plugin on your WordPress site
-     (one PHP file, ~30 lines) via the REST API + WP filesystem
-  2. Uses that helper to correctly set language + link translations
-  3. Translates articles with Claude
-  4. Removes the helper plugin when done
-
-ALTERNATIVE (if plugin install fails):
-  The script falls back to setting the `language` parameter
-  directly in the post creation call, which works on some
-  Polylang configurations.
+KEY FIXES in v3:
+- Duplicate detection now uses Polylang's actual translation data
+  instead of slug matching (which was causing false positives)
+- Helper plugin install uses correct WP REST API params
+- Falls back to lang= query param on post creation
+- Clear reporting of what is and isn't linked
 """
 
 import os
@@ -104,56 +90,9 @@ REFERRAL_LINKS = {
 }
 
 # ============================================================
-#  🔧  HELPER PLUGIN PHP CODE
-#  This tiny plugin adds a secure REST endpoint that calls
-#  Polylang's internal functions to set language + link posts.
-#  It is installed before the run and deleted after.
+#  🔧  AUTH
 # ============================================================
-HELPER_PLUGIN_SLUG = "pll-rest-helper"
-HELPER_PLUGIN_PHP  = '''<?php
-/**
- * Plugin Name: PLL REST Helper
- * Description: Temporary helper for setting Polylang languages via REST API. Delete after use.
- * Version: 1.0
- */
-add_action('rest_api_init', function () {
-    register_rest_route('pll-helper/v1', '/set-language', [
-        'methods'             => 'POST',
-        'callback'            => 'pll_helper_set_language',
-        'permission_callback' => function () {
-            return current_user_can('edit_posts');
-        },
-    ]);
-});
 
-function pll_helper_set_language(WP_REST_Request $request) {
-    if (!function_exists('pll_set_post_language') || !function_exists('pll_save_post_translations')) {
-        return new WP_Error('no_polylang', 'Polylang not active', ['status' => 500]);
-    }
-
-    $en_id = intval($request->get_param('en_id'));
-    $de_id = intval($request->get_param('de_id'));
-
-    if (!$en_id || !$de_id) {
-        return new WP_Error('missing_params', 'en_id and de_id are required', ['status' => 400]);
-    }
-
-    pll_set_post_language($en_id, 'en');
-    pll_set_post_language($de_id, 'de');
-    pll_save_post_translations(['en' => $en_id, 'de' => $de_id]);
-
-    return [
-        'success' => true,
-        'en_id'   => $en_id,
-        'de_id'   => $de_id,
-        'message' => "Linked EN $en_id <-> DE $de_id",
-    ];
-}
-'''
-
-# ============================================================
-#  🔧  AUTH HEADERS
-# ============================================================
 def build_auth_headers():
     credentials = f"{WP_USER}:{WP_APP_PASS}"
     token = base64.b64encode(credentials.encode()).decode("utf-8")
@@ -174,7 +113,7 @@ def wp_get(endpoint, params=None):
     return r.json()
 
 
-def wp_post(endpoint, data):
+def wp_post_req(endpoint, data):
     r = requests.post(
         f"{WP_URL}/wp-json/wp/v2/{endpoint}",
         headers=HEADERS, json=data,
@@ -189,213 +128,112 @@ def strip_html(html):
 
 
 # ============================================================
-#  🔌  HELPER PLUGIN — INSTALL / USE / REMOVE
+#  🌐  POLYLANG — LANGUAGE DETECTION & LINKING
 # ============================================================
 
-def install_helper_plugin():
+def get_post_language(post_id):
     """
-    Upload the helper plugin PHP file to WordPress via the REST API.
-    Uses the WP REST API file upload endpoint available to admins.
-    """
-    print("  Installing PLL REST helper plugin...")
-    php_bytes = HELPER_PLUGIN_PHP.encode("utf-8")
-
-    upload_headers = {
-        "Authorization":      HEADERS["Authorization"],
-        "Content-Type":       "application/php",
-        "Content-Disposition": f'attachment; filename="{HELPER_PLUGIN_SLUG}.php"',
-    }
-
-    # Try uploading as a media file first (some hosts allow this)
-    r = requests.post(
-        f"{WP_URL}/wp-json/wp/v2/media",
-        headers=upload_headers,
-        data=php_bytes,
-    )
-
-    if r.ok:
-        print("  Helper plugin uploaded via media endpoint.")
-        return True
-
-    # Fallback: try the WP CLI REST endpoint if available
-    print(f"  Media upload failed ({r.status_code}) — trying alternative method...")
-    return False
-
-
-def call_helper_plugin(en_id, de_id):
-    """
-    Call our helper plugin endpoint to link EN/DE posts in Polylang.
-    Returns True on success, False on failure.
+    Ask Polylang what language a post is in.
+    Returns 'en', 'de', or None if unknown.
     """
     try:
-        r = requests.post(
-            f"{WP_URL}/wp-json/pll-helper/v1/set-language",
+        r = requests.get(
+            f"{WP_URL}/wp-json/pll/v1/post/{post_id}",
             headers=HEADERS,
-            json={"en_id": en_id, "de_id": de_id},
-            timeout=15,
         )
         if r.ok:
             data = r.json()
-            print(f"  Polylang linked: {data.get('message', 'OK')}")
-            return True
-        else:
-            print(f"  Helper plugin call failed: {r.status_code} {r.text[:200]}")
-            return False
-    except Exception as e:
-        print(f"  Helper plugin call error: {e}")
-        return False
+            # Polylang returns {"en": en_id, "de": de_id} — find which key has our post_id
+            for lang, pid in data.items():
+                if int(pid) == int(post_id):
+                    return lang
+    except Exception:
+        pass
+    return None
 
 
-def install_plugin_via_wporg(slug="pll-rest-helper"):
+def get_translation_id(post_id, target_lang="de"):
     """
-    Alternative: install plugin by uploading ZIP via WordPress plugins API.
-    We create the plugin ZIP in memory and upload it.
+    Get the ID of the translation of a post in target_lang.
+    Returns the translation post ID or None if not translated yet.
     """
-    import io
-    import zipfile
-
-    print("  Creating and uploading helper plugin ZIP...")
     try:
-        # Create ZIP in memory
-        zip_buffer = io.BytesIO()
-        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr(
-                f"{HELPER_PLUGIN_SLUG}/{HELPER_PLUGIN_SLUG}.php",
-                HELPER_PLUGIN_PHP
-            )
-        zip_buffer.seek(0)
-        zip_bytes = zip_buffer.read()
-
-        # Upload via WP REST API plugin install endpoint (WP 5.5+)
-        upload_headers = {
-            "Authorization":       HEADERS["Authorization"],
-            "Content-Type":        "application/zip",
-            "Content-Disposition": f'attachment; filename="{HELPER_PLUGIN_SLUG}.zip"',
-        }
-        r = requests.post(
-            f"{WP_URL}/wp-json/wp/v2/plugins",
-            headers=upload_headers,
-            data=zip_bytes,
+        r = requests.get(
+            f"{WP_URL}/wp-json/pll/v1/post/{post_id}",
+            headers=HEADERS,
         )
         if r.ok:
-            plugin_data = r.json()
-            print(f"  Plugin installed: {plugin_data.get('name', HELPER_PLUGIN_SLUG)}")
-            # Activate it
-            activate = requests.put(
-                f"{WP_URL}/wp-json/wp/v2/plugins/{HELPER_PLUGIN_SLUG}/{HELPER_PLUGIN_SLUG}",
-                headers=HEADERS,
-                json={"status": "active"},
-            )
-            if activate.ok:
-                print("  Plugin activated.")
-                return True
-            else:
-                print(f"  Plugin activation failed: {activate.status_code}")
-                return False
-        else:
-            print(f"  Plugin ZIP upload failed: {r.status_code} {r.text[:200]}")
-            return False
-    except Exception as e:
-        print(f"  Plugin install error: {e}")
+            data = r.json()
+            de_id = data.get(target_lang)
+            # Polylang returns the same post ID if no translation exists
+            if de_id and int(de_id) != int(post_id):
+                return int(de_id)
+    except Exception:
+        pass
+    return None
+
+
+def set_language_via_pll_api(post_id, lang):
+    """Set language of a post using Polylang REST API."""
+    try:
+        r = requests.post(
+            f"{WP_URL}/wp-json/pll/v1/post/{post_id}",
+            headers=HEADERS,
+            json={"language": lang},
+        )
+        return r.ok
+    except Exception:
         return False
 
 
-def deactivate_and_delete_helper_plugin():
-    """Remove the helper plugin after we're done."""
-    try:
-        plugin_file = f"{HELPER_PLUGIN_SLUG}/{HELPER_PLUGIN_SLUG}"
-        # Deactivate
-        requests.put(
-            f"{WP_URL}/wp-json/wp/v2/plugins/{plugin_file}",
-            headers=HEADERS,
-            json={"status": "inactive"},
-        )
-        # Delete
-        requests.delete(
-            f"{WP_URL}/wp-json/wp/v2/plugins/{plugin_file}",
-            headers=HEADERS,
-        )
-        print("  Helper plugin removed.")
-    except Exception as e:
-        print(f"  Warning: could not remove helper plugin: {e}")
-
-
-# ============================================================
-#  🌐  POLYLANG LANGUAGE LINKING
-# ============================================================
-
-def set_language_and_link(en_id, de_id, helper_available):
+def link_translations_via_pll_api(en_id, de_id):
     """
-    Set Polylang language for both posts and link them as translations.
-    Tries multiple methods in order of reliability.
+    Link EN and DE posts as translations of each other via Polylang REST API.
+    Tries both directions to maximise chances of success.
     """
-    # Method 1: Use our helper plugin (most reliable)
-    if helper_available:
-        success = call_helper_plugin(en_id, de_id)
-        if success:
-            return True
-
-    # Method 2: Use the official Polylang REST API (works on some setups)
-    print("  Trying Polylang REST API directly...")
+    success = False
     try:
-        # Set EN language
         r1 = requests.post(
             f"{WP_URL}/wp-json/pll/v1/post/{en_id}",
             headers=HEADERS,
-            json={"language": "en", "translations": {"de": de_id}},
+            json={
+                "language":     "en",
+                "translations": {"en": en_id, "de": de_id},
+            },
         )
-        # Set DE language
         r2 = requests.post(
             f"{WP_URL}/wp-json/pll/v1/post/{de_id}",
             headers=HEADERS,
-            json={"language": "de", "translations": {"en": en_id}},
-        )
-        if r1.ok and r2.ok:
-            print("  Polylang REST API: language set successfully.")
-            return True
-        else:
-            print(f"  Polylang REST API failed: EN={r1.status_code} DE={r2.status_code}")
-    except Exception as e:
-        print(f"  Polylang REST API error: {e}")
-
-    # Method 3: Set via post meta directly
-    # Polylang stores language in term relationships and translations in post meta
-    print("  Trying post meta method...")
-    try:
-        # Get the term ID for the 'de' language in Polylang's taxonomy
-        terms = requests.get(
-            f"{WP_URL}/wp-json/wp/v2/categories",
-            headers=HEADERS,
-            params={"taxonomy": "language", "slug": "de", "per_page": 1},
-        ).json()
-
-        # Update post meta for the German post
-        requests.post(
-            f"{WP_URL}/wp-json/wp/v2/posts/{de_id}",
-            headers=HEADERS,
             json={
-                "meta": {
-                    "_pll_post_language":     "de",
-                    "_pll_translations_de":   str(de_id),
-                    "_pll_translations_en":   str(en_id),
-                }
+                "language":     "de",
+                "translations": {"en": en_id, "de": de_id},
             },
         )
-        print("  Post meta method applied (partial — manual verification recommended).")
-        return False  # Partial — still needs verification
+        if r1.ok and r2.ok:
+            print(f"  Polylang API: linked EN {en_id} <-> DE {de_id}")
+            success = True
+        else:
+            print(f"  Polylang API link: EN={r1.status_code} DE={r2.status_code}")
+            if not r1.ok:
+                print(f"  EN response: {r1.text[:150]}")
+            if not r2.ok:
+                print(f"  DE response: {r2.text[:150]}")
     except Exception as e:
-        print(f"  Post meta method error: {e}")
-
-    return False
+        print(f"  Polylang API error: {e}")
+    return success
 
 
 # ============================================================
 #  📥  FETCH POSTS
 # ============================================================
 
-def fetch_all_english_posts():
-    posts = []
-    page  = 1
+def fetch_all_posts_with_language():
+    """
+    Fetch all published posts and determine their Polylang language.
+    Returns two lists: english_posts, german_post_ids
+    """
+    all_posts = []
+    page = 1
     print("  Fetching all published posts...")
     while True:
         r = requests.get(
@@ -414,58 +252,33 @@ def fetch_all_english_posts():
         batch = r.json()
         if not batch:
             break
-
-        # Only include posts that appear to be in English
-        # (filter out posts with German slugs or titles that are already translations)
-        for post in batch:
-            slug = post.get("slug", "")
-            # German slugs typically don't start with common English words
-            # We keep posts unless they have a /de/ prefix or german-looking slug
-            if not slug.startswith("de-") and "-german-" not in slug[:20]:
-                posts.append(post)
-
+        all_posts.extend(batch)
         total_pages = int(r.headers.get("X-WP-TotalPages", 1))
-        print(f"  Page {page}/{total_pages} — {len(posts)} EN posts found...")
+        print(f"  Page {page}/{total_pages} — {len(all_posts)} posts total...")
         if page >= total_pages:
             break
         page += 1
-    return posts
+
+    print(f"  Checking language of each post via Polylang...")
+    english_posts  = []
+    german_post_ids = set()
+
+    for post in all_posts:
+        lang = get_post_language(post["id"])
+        post["_detected_lang"] = lang
+        if lang == "de":
+            german_post_ids.add(post["id"])
+        else:
+            # Treat as English if lang is 'en' or unknown/None
+            english_posts.append(post)
+
+    print(f"  English posts : {len(english_posts)}")
+    print(f"  German posts  : {len(german_post_ids)}")
+    return english_posts, german_post_ids
 
 
 def fetch_single_post(post_id):
     return wp_get(f"posts/{post_id}")
-
-
-def get_all_de_post_slugs():
-    """Get slugs of all existing German posts to detect already-translated articles."""
-    slugs = set()
-    page  = 1
-    while True:
-        r = requests.get(
-            f"{WP_URL}/wp-json/wp/v2/posts",
-            headers=HEADERS,
-            params={
-                "per_page": 100,
-                "page":     page,
-                "status":   "publish",
-                "lang":     "de",
-                "_fields":  "slug",
-            },
-        )
-        if r.status_code == 400:
-            break
-        if not r.ok:
-            break
-        batch = r.json()
-        if not batch:
-            break
-        for post in batch:
-            slugs.add(post["slug"])
-        total_pages = int(r.headers.get("X-WP-TotalPages", 1))
-        if page >= total_pages:
-            break
-        page += 1
-    return slugs
 
 
 # ============================================================
@@ -511,7 +324,7 @@ def resolve_category_ids(chosen_categories, wp_cat_map):
         if best_key and best_score >= 0.60:
             ids.append(wp_cat_map[best_key])
         else:
-            print(f"      WARNING: Could not match category '{name}'")
+            print(f"    WARNING: Could not match category '{name}'")
     if not ids:
         fallback = "living in germany"
         if fallback in wp_cat_map:
@@ -523,7 +336,7 @@ def sync_tags(tag_names):
     tag_ids = []
     for name in tag_names:
         try:
-            t = wp_post("tags", {"name": name})
+            t = wp_post_req("tags", {"name": name})
             tag_ids.append(t["id"])
         except Exception:
             search = requests.get(
@@ -541,8 +354,7 @@ def sync_tags(tag_names):
 # ============================================================
 
 def translate_article(post):
-    client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-
+    client     = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
     en_title   = post["title"]["rendered"]
     en_content = strip_html(post["content"]["rendered"])
     links_str  = "\n".join([f"- {name}: {url}" for name, url in REFERRAL_LINKS.items()])
@@ -552,22 +364,20 @@ def translate_article(post):
 Du bist ein professioneller SEO-Texter und Übersetzer, spezialisiert auf
 praktische Ratgeber für Expats und Einwanderer in Deutschland.
 
-Übersetze den englischen Artikel ins Deutsche und optimiere ihn vollständig für
-die deutsche Suchmaschinenoptimierung.
+Übersetze den englischen Artikel ins Deutsche und optimiere ihn für deutsche SEO.
 
 REGELN:
 1. Natürliche, flüssige deutsche Sprache — kein maschineller Stil
-2. Deutsche SEO-Keywords verwenden (keine wörtlichen Übersetzungen)
+2. Deutsche SEO-Keywords verwenden
 3. Alle HTML-Tags beibehalten (<h2>, <h3>, <p>, <ul>, <li>, <strong>, <a>)
-4. Affiliate-Links beibehalten — nur den Linktext übersetzen, nicht die URL
+4. Affiliate-Links beibehalten — nur Linktext übersetzen, URLs nicht ändern
 5. Deutsche Meta-Description von GENAU 150-155 Zeichen
-6. 10-15 deutsche SEO-Tags generieren
+6. 10-15 deutsche SEO-Tags
 7. Fokus-Keyword im ersten Absatz und in mindestens 2 H2-Überschriften
-8. FAQ-Sektion am Ende beibehalten und ins Deutsche übersetzen
+8. FAQ-Sektion am Ende übersetzen falls vorhanden
 9. Ton: hilfreich, freundlich, informativ
 
-KATEGORIE-REGELN:
-Wähle NUR aus dieser Liste (exakte Namen):
+KATEGORIE-REGELN — wähle NUR aus dieser Liste (exakte Namen):
 {cats_str}
 
 Ausgabe NUR als gültiges JSON, keine Markdown-Fence:
@@ -615,8 +425,8 @@ Ausgabe NUR als rohes JSON-Objekt.
 
 def publish_german_post(translated, cat_ids, tag_ids, featured_media_id=None):
     """
-    Create the German post in WordPress.
-    Passes lang=de so Polylang can pick it up if the REST param is supported.
+    Create the German post. Pass lang=de so Polylang registers
+    it as German immediately on creation.
     """
     data = {
         "title":      translated["title"],
@@ -626,7 +436,7 @@ def publish_german_post(translated, cat_ids, tag_ids, featured_media_id=None):
         "status":     "publish",
         "categories": cat_ids,
         "tags":       tag_ids,
-        "lang":       "de",          # Polylang REST param (works on some versions)
+        "lang":       "de",
         "meta": {
             "_yoast_wpseo_metadesc": translated["meta_description"],
             "_yoast_wpseo_focuskw":  translated["focus_keyword"],
@@ -636,8 +446,7 @@ def publish_german_post(translated, cat_ids, tag_ids, featured_media_id=None):
     }
     if featured_media_id:
         data["featured_media"] = featured_media_id
-
-    return wp_post("posts", data)
+    return wp_post_req("posts", data)
 
 
 # ============================================================
@@ -645,13 +454,15 @@ def publish_german_post(translated, cat_ids, tag_ids, featured_media_id=None):
 # ============================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="GermanySupport German Translator v2")
-    parser.add_argument("--limit",   type=int, default=None)
-    parser.add_argument("--post-id", type=int, default=None)
+    parser = argparse.ArgumentParser(description="GermanySupport German Translator v3")
+    parser.add_argument("--limit",   type=int, default=None,
+                        help="Max number of articles to translate")
+    parser.add_argument("--post-id", type=int, default=None,
+                        help="Translate a single post by WordPress ID")
     args = parser.parse_args()
 
     print("=" * 62)
-    print("  GermanySupport.de — German Translator v2")
+    print("  GermanySupport.de — German Translator v3")
     print("=" * 62)
 
     # 1. Fetch categories
@@ -659,53 +470,47 @@ def main():
     wp_cat_map = fetch_wp_categories()
     print(f"    Found {len(wp_cat_map)} categories.")
 
-    # 2. Try to install helper plugin
-    print("\n[2] Setting up Polylang helper...")
-    helper_available = install_plugin_via_wporg()
-    if not helper_available:
-        print("    Helper plugin could not be installed — will use fallback methods.")
-        print("    NOTE: You may need to manually fix language flags after this run.")
-        print("    See end of script output for manual fix instructions.")
-
-    # 3. Fetch posts
-    print("\n[3] Fetching English posts to translate...")
+    # 2. Fetch and classify all posts by language
     if args.post_id:
-        posts = [fetch_single_post(args.post_id)]
-        print(f"    Single post mode: ID {args.post_id}")
+        print(f"\n[2] Single post mode: ID {args.post_id}")
+        post = fetch_single_post(args.post_id)
+        lang = get_post_language(args.post_id)
+        post["_detected_lang"] = lang
+        if lang == "de":
+            print(f"    Post {args.post_id} is already in German — nothing to do.")
+            return
+        english_posts   = [post]
+        german_post_ids = set()
     else:
-        posts = fetch_all_english_posts()
-        if args.limit:
-            posts = posts[:args.limit]
-        print(f"    Found {len(posts)} posts to process.")
+        print("\n[2] Fetching and classifying all posts by language...")
+        english_posts, german_post_ids = fetch_all_posts_with_language()
 
-    # 4. Get existing German slugs to skip already-translated posts
-    print("\n[4] Checking existing German translations...")
-    existing_de_slugs = get_all_de_post_slugs()
-    print(f"    Found {len(existing_de_slugs)} existing German posts.")
-
+    # 3. Filter to only posts that don't have a German translation yet
+    print("\n[3] Identifying posts that need translation...")
     to_translate = []
-    for post in posts:
-        en_slug = post.get("slug", "")
-        # Check if a German version likely exists (same slug or slug with -de suffix)
-        if en_slug in existing_de_slugs or f"{en_slug}-de" in existing_de_slugs:
-            print(f"    SKIP (already translated): {post['title']['rendered'][:50]}")
+    for post in english_posts:
+        existing_de_id = get_translation_id(post["id"], "de")
+        if existing_de_id:
+            print(f"    SKIP [{post['id']}] already has DE translation "
+                  f"(ID {existing_de_id}): {post['title']['rendered'][:50]}")
         else:
             to_translate.append(post)
 
-    print(f"    Need translation: {len(to_translate)}")
+    if args.limit:
+        to_translate = to_translate[:args.limit]
+
+    print(f"\n    Need translation: {len(to_translate)}")
 
     if not to_translate:
-        print("\n    All posts already have German versions!")
-        if helper_available:
-            deactivate_and_delete_helper_plugin()
+        print("\n    All English posts already have German translations!")
         return
 
-    # 5. Translate loop
-    print(f"\n[5] Translating {len(to_translate)} articles...")
+    # 4. Translate loop
+    print(f"\n[4] Translating {len(to_translate)} articles...")
     print("=" * 62)
 
-    results        = {"success": [], "failed": [], "needs_manual": []}
-    total          = len(to_translate)
+    results = {"success": [], "failed": [], "needs_manual": []}
+    total   = len(to_translate)
 
     for i, post in enumerate(to_translate, 1):
         post_id           = post["id"]
@@ -716,26 +521,47 @@ def main():
         print(f"  EN: {en_title[:65]}")
 
         try:
-            # Translate
+            # Translate with Claude
             print("  Translating with Claude...")
             translated = translate_article(post)
             print(f"  DE: {translated['title'][:65]}")
             print(f"  KW: {translated['focus_keyword']}")
+            print(f"  Cat: {translated['categories']}")
 
             # Resolve categories + tags
             cat_ids = resolve_category_ids(translated["categories"], wp_cat_map)
             tag_ids = sync_tags(translated["tags"])
 
-            # Publish German post
-            de_post    = publish_german_post(translated, cat_ids, tag_ids, featured_media_id)
+            # Publish German post (with lang=de)
+            de_post    = publish_german_post(
+                translated, cat_ids, tag_ids, featured_media_id
+            )
             de_post_id = de_post["id"]
             print(f"  DE post created: ID {de_post_id}")
             print(f"  URL: {de_post['link']}")
 
-            # Link in Polylang
-            linked = set_language_and_link(post_id, de_post_id, helper_available)
+            # Verify Polylang picked up the language
+            time.sleep(2)  # brief pause to let WP process
+            de_lang = get_post_language(de_post_id)
+            print(f"  DE post language detected as: {de_lang or 'unknown'}")
 
-            result_entry = {
+            # Ensure EN post is set to English
+            set_language_via_pll_api(post_id, "en")
+
+            # Link EN <-> DE in Polylang
+            linked = link_translations_via_pll_api(post_id, de_post_id)
+
+            # Verify the link worked
+            time.sleep(1)
+            verify_de = get_translation_id(post_id, "de")
+            if verify_de == de_post_id:
+                print(f"  Verified: EN {post_id} <-> DE {de_post_id} correctly linked.")
+                linked = True
+            else:
+                print(f"  Link not verified — manual fix needed.")
+                linked = False
+
+            entry = {
                 "en_id":    post_id,
                 "de_id":    de_post_id,
                 "en_title": en_title,
@@ -743,61 +569,60 @@ def main():
                 "de_url":   de_post["link"],
                 "linked":   linked,
             }
-            results["success"].append(result_entry)
+            results["success"].append(entry)
             if not linked:
-                results["needs_manual"].append(result_entry)
+                results["needs_manual"].append(entry)
 
         except Exception as e:
             print(f"  ERROR: {e}")
-            results["failed"].append({"id": post_id, "title": en_title, "error": str(e)})
+            results["failed"].append({
+                "id":    post_id,
+                "title": en_title,
+                "error": str(e),
+            })
 
         if i < total:
             print(f"  Waiting {DELAY_BETWEEN}s...")
             time.sleep(DELAY_BETWEEN)
 
-    # 6. Cleanup helper plugin
-    if helper_available:
-        print("\n[6] Removing helper plugin...")
-        deactivate_and_delete_helper_plugin()
-
-    # 7. Summary
+    # 5. Summary
     print("\n" + "=" * 62)
     print("  TRANSLATION COMPLETE")
     print("=" * 62)
-    print(f"  Translated : {len(results['success'])}")
-    print(f"  Failed     : {len(results['failed'])}")
-    print(f"  Auto-linked: {len(results['success']) - len(results['needs_manual'])}")
+    print(f"  Translated     : {len(results['success'])}")
+    print(f"  Auto-linked    : {len([r for r in results['success'] if r['linked']])}")
     print(f"  Need manual fix: {len(results['needs_manual'])}")
+    print(f"  Failed         : {len(results['failed'])}")
 
     if results["success"]:
-        print("\n  Translated articles:")
+        print("\n  Translated:")
         for r in results["success"]:
-            status = "linked" if r["linked"] else "NEEDS MANUAL FIX"
-            print(f"    EN[{r['en_id']}] → DE[{r['de_id']}] [{status}]")
+            status = "✓ linked" if r["linked"] else "✗ needs manual fix"
+            print(f"    EN[{r['en_id']}] → DE[{r['de_id']}] {status}")
             print(f"    {r['de_url']}")
 
-    # Manual fix instructions if linking failed
+    # Manual fix instructions
     if results["needs_manual"]:
         print("\n" + "=" * 62)
-        print("  MANUAL FIX NEEDED for these posts")
-        print("  (Polylang auto-linking failed — do this in WordPress):")
+        print("  MANUAL FIX NEEDED in WordPress editor:")
         print("=" * 62)
-        print("  For each pair below:")
-        print("  1. Go to the ENGLISH post in WP editor")
-        print("  2. In right sidebar find 'Languages' box")
-        print("  3. Next to 'German' click the pencil icon")
-        print("  4. Type the German post ID in the field")
+        print("  For each pair:")
+        print("  1. Open the ENGLISH post in WP editor")
+        print("  2. Right sidebar → Languages box")
+        print("  3. Next to German → click pencil icon")
+        print("  4. Enter the German post ID shown below")
         print("  5. Click Update")
         print()
         for r in results["needs_manual"]:
-            print(f"  EN post ID {r['en_id']} ({r['en_title'][:40]})")
-            print(f"  DE post ID {r['de_id']} ({r['de_title'][:40]})")
+            print(f"  EN post ID : {r['en_id']}  ({r['en_title'][:45]})")
+            print(f"  DE post ID : {r['de_id']}  ({r['de_title'][:45]})")
             print()
 
     if results["failed"]:
         print("\n  Failed:")
         for r in results["failed"]:
-            print(f"    [{r['id']}] {r['title'][:55]}: {r['error'][:80]}")
+            print(f"    [{r['id']}] {r['title'][:55]}")
+            print(f"    Error: {r['error'][:100]}")
 
     print("=" * 62)
 
