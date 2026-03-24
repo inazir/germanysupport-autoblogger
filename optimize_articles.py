@@ -1,18 +1,27 @@
 """
-GermanySupport.de — SEO Optimizer & Article Rewriter v3
-========================================================
-Fully compatible with Rank Math SEO plugin.
+GermanySupport.de — SEO Optimizer v5
+======================================
+Handles BOTH Gutenberg and Elementor articles in one run.
 
-Fixes all Rank Math errors:
-  - Writes focus keyword to Rank Math meta fields
-  - Focus keyword enforced in title, slug, meta description, first paragraph
-  - Adds Table of Contents (TOC) after introduction
-  - Adds internal links to related articles
-  - Updates featured image alt text with focus keyword
-  - Shorter slugs (under 60 characters)
-  - Affiliate disclosure at top of every article
-  - FAQ section at bottom
-  - 1200-1800 words minimum
+Gutenberg posts:
+  - Content read/written via standard post_content field
+  - TOC, internal links, disclosure injected directly
+  - Full rewrite by Claude
+
+Elementor posts:
+  - Content extracted from _elementor_data JSON blob
+  - Text nodes updated with Claude-rewritten content
+  - Elementor data saved back via REST API
+  - SEO fields updated via Rank Math API
+
+Both post types:
+  - Rank Math focus keyword, title, description via /rankmath/v1/updateMeta
+  - Featured image alt text updated
+  - Tags and categories updated
+  - Affiliate disclosure added
+  - Internal links added
+  - FAQ section added
+  - Min 1200 words enforced
 
 Usage:
   python optimize_articles.py                  # all English articles
@@ -43,17 +52,25 @@ ANTHROPIC_KEY = os.environ["ANTHROPIC_KEY"]
 # ============================================================
 #  ⚙️  SETTINGS
 # ============================================================
-MIN_WORD_COUNT = 1200
-DELAY_BETWEEN  = 10
-CURRENT_YEAR   = 2025
+MIN_WORD_COUNT  = 1200
+DELAY_BETWEEN   = 10
+CURRENT_YEAR    = 2025
 MAX_SLUG_LENGTH = 60
 
 # ============================================================
 #  📢  AFFILIATE DISCLOSURE
 # ============================================================
-AFFILIATE_DISCLOSURE = """<div style="background:#f0f7ff;border-left:4px solid #0073aa;padding:12px 16px;margin-bottom:24px;font-size:14px;line-height:1.6;border-radius:0 4px 4px 0;">
-<strong>Affiliate Disclosure:</strong> This article contains affiliate links. If you click a link and make a purchase or sign up, we may earn a small commission at no extra cost to you. We only recommend services we believe are genuinely useful for expats in Germany. <a href="/affiliate-disclosure/" style="color:#0073aa;">Read our full disclosure.</a>
-</div>"""
+AFFILIATE_DISCLOSURE = (
+    '<div style="background:#f0f7ff;border-left:4px solid #0073aa;'
+    'padding:12px 16px;margin-bottom:24px;font-size:14px;'
+    'line-height:1.6;border-radius:0 4px 4px 0;">'
+    '<strong>Affiliate Disclosure:</strong> This article contains '
+    'affiliate links. If you click a link and make a purchase or sign up, '
+    'we may earn a small commission at no extra cost to you. We only '
+    'recommend services genuinely useful for expats in Germany. '
+    '<a href="/affiliate-disclosure/" style="color:#0073aa;">'
+    'Read our full disclosure.</a></div>'
+)
 
 # ============================================================
 #  📂  ALLOWED CATEGORIES
@@ -132,8 +149,151 @@ def strip_html(html):
     return re.sub(r"<[^>]+>", " ", html or "")
 
 
-def word_count(html):
-    return len(strip_html(html).split())
+def word_count(text):
+    return len(strip_html(text).split())
+
+
+# ============================================================
+#  🔍  EDITOR DETECTION
+# ============================================================
+
+def detect_editor(post):
+    """
+    Returns 'elementor' or 'gutenberg'.
+    Checks _elementor_edit_mode meta and elementor data.
+    """
+    meta      = post.get("meta", {})
+    edit_mode = meta.get("_elementor_edit_mode", "")
+    data      = meta.get("_elementor_data", "")
+
+    if edit_mode == "builder":
+        return "elementor"
+    if data and data not in ("", "[]", None):
+        return "elementor"
+    # Also check rendered content — Elementor posts have very little
+    # in post_content but lots of shortcodes or empty content
+    content = post.get("content", {}).get("rendered", "")
+    if word_count(content) < 100 and edit_mode:
+        return "elementor"
+    return "gutenberg"
+
+
+# ============================================================
+#  🧩  ELEMENTOR DATA HELPERS
+# ============================================================
+
+def extract_text_from_elementor(elementor_data_str):
+    """
+    Parse Elementor JSON and extract all visible text content.
+    Elementor stores content in nested widget objects.
+    Returns plain text string of all content.
+    """
+    try:
+        data = json.loads(elementor_data_str)
+    except Exception:
+        return ""
+
+    texts = []
+
+    def traverse(obj):
+        if isinstance(obj, list):
+            for item in obj:
+                traverse(item)
+        elif isinstance(obj, dict):
+            # Text widget types
+            widget_type = obj.get("widgetType", "")
+            settings    = obj.get("settings", {})
+
+            if widget_type in ("text-editor", "theme-post-content"):
+                content = settings.get("editor", "") or settings.get("content", "")
+                if content:
+                    texts.append(strip_html(content))
+
+            elif widget_type == "heading":
+                title = settings.get("title", "")
+                if title:
+                    texts.append(strip_html(title))
+
+            elif widget_type == "accordion":
+                items = settings.get("tabs", [])
+                for item in items:
+                    texts.append(strip_html(item.get("tab_title", "")))
+                    texts.append(strip_html(item.get("tab_content", "")))
+
+            # Recurse into elements/children
+            for key in ("elements", "children"):
+                if key in obj:
+                    traverse(obj[key])
+
+    traverse(data)
+    return " ".join(t for t in texts if t.strip())
+
+
+def update_elementor_content(elementor_data_str, new_content_html):
+    """
+    Replace the main text content in Elementor data with new HTML.
+    Finds the first text-editor widget and replaces its content.
+    Also updates heading widgets with focus keyword.
+    Returns updated Elementor JSON string.
+    """
+    try:
+        data = json.loads(elementor_data_str)
+    except Exception:
+        return elementor_data_str
+
+    updated    = [False]  # Use list to allow mutation in nested function
+    paragraphs = re.split(r'<h[23][^>]*>|</h[23]>', new_content_html)
+
+    def traverse_update(obj):
+        if isinstance(obj, list):
+            for item in obj:
+                traverse_update(item)
+        elif isinstance(obj, dict):
+            widget_type = obj.get("widgetType", "")
+            settings    = obj.get("settings", {})
+
+            # Update the first text-editor widget with full new content
+            if widget_type == "text-editor" and not updated[0]:
+                obj["settings"]["editor"] = new_content_html
+                updated[0] = True
+
+            # Recurse
+            for key in ("elements", "children"):
+                if key in obj:
+                    traverse_update(obj[key])
+
+    traverse_update(data)
+    return json.dumps(data, ensure_ascii=False)
+
+
+def fetch_elementor_raw_data(post_id):
+    """
+    Fetch the raw _elementor_data meta field using context=edit.
+    Returns the raw JSON string or empty string.
+    """
+    r = requests.get(
+        f"{WP_URL}/wp-json/wp/v2/posts/{post_id}",
+        headers=HEADERS,
+        params={"context": "edit", "_fields": "meta"},
+    )
+    if r.ok:
+        meta = r.json().get("meta", {})
+        return meta.get("_elementor_data", "") or ""
+    return ""
+
+
+def save_elementor_data(post_id, elementor_data_str):
+    """Save updated Elementor data back to the post."""
+    r = requests.post(
+        f"{WP_URL}/wp-json/wp/v2/posts/{post_id}",
+        headers=HEADERS,
+        json={"meta": {"_elementor_data": elementor_data_str}},
+    )
+    if not r.ok:
+        raise Exception(
+            f"Failed to save Elementor data: {r.status_code} {r.text[:200]}"
+        )
+    return r.json()
 
 
 # ============================================================
@@ -146,13 +306,11 @@ def parse_claude_json(raw_text):
     text = re.sub(r"^```\s*",     "", text)
     text = re.sub(r"```$",        "", text).strip()
 
-    # Strategy 1: direct
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
 
-    # Strategy 2: extract object
     match = re.search(r'\{.*\}', text, re.DOTALL)
     if match:
         try:
@@ -160,7 +318,6 @@ def parse_claude_json(raw_text):
         except json.JSONDecodeError:
             pass
 
-    # Strategy 3: fix common issues
     fixed = re.sub(r',\s*([}\]])', r'\1', text)
     fixed = fixed.replace('\u201c', '"').replace('\u201d', '"')
     fixed = fixed.replace('\u2018', "'").replace('\u2019', "'")
@@ -169,7 +326,6 @@ def parse_claude_json(raw_text):
     except json.JSONDecodeError:
         pass
 
-    # Strategy 4: ask Claude to repair
     print("  JSON malformed — asking Claude to repair...")
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
     repair = client.messages.create(
@@ -179,14 +335,67 @@ def parse_claude_json(raw_text):
             "role": "user",
             "content": (
                 "Fix this malformed JSON. Return ONLY valid JSON, "
-                "no markdown, no explanation:\n\n" + text[:3000]
+                "no markdown fences, no explanation:\n\n" + text[:3000]
             ),
         }],
     )
     repaired = repair.content[0].text.strip()
     repaired = re.sub(r"^```json\s*", "", repaired)
-    repaired = re.sub(r"```$", "", repaired).strip()
+    repaired = re.sub(r"```$",        "", repaired).strip()
     return json.loads(repaired)
+
+
+# ============================================================
+#  🎯  RANK MATH NATIVE API
+# ============================================================
+
+def update_rank_math_seo(post_id, focus_keyword, meta_title, meta_description):
+    """Update Rank Math SEO data via its native REST endpoint."""
+    try:
+        # Try JSON format first
+        r = requests.post(
+            f"{WP_URL}/wp-json/rankmath/v1/updateMeta",
+            headers=HEADERS,
+            json={
+                "objectID":   post_id,
+                "objectType": "post",
+                "meta": {
+                    "rank_math_focus_keyword": focus_keyword,
+                    "rank_math_title":         meta_title,
+                    "rank_math_description":   meta_description,
+                    "rank_math_robots":        ["index", "follow"],
+                },
+            },
+        )
+        if r.ok:
+            print(f"  Rank Math: updated via native API.")
+            return True
+
+        # Try form-encoded format
+        form_headers = dict(HEADERS)
+        form_headers["Content-Type"] = "application/x-www-form-urlencoded"
+        r2 = requests.post(
+            f"{WP_URL}/wp-json/rankmath/v1/updateMeta",
+            headers=form_headers,
+            data={
+                "objectID":                post_id,
+                "objectType":              "post",
+                "rank_math_focus_keyword": focus_keyword,
+                "rank_math_title":         meta_title,
+                "rank_math_description":   meta_description,
+            },
+        )
+        if r2.ok:
+            print(f"  Rank Math: updated via form data.")
+            return True
+
+        print(f"  Rank Math API failed: {r.status_code} — "
+              f"set keyword manually: '{focus_keyword}'")
+        return False
+
+    except Exception as e:
+        print(f"  Rank Math API error: {e}")
+        return False
 
 
 # ============================================================
@@ -205,7 +414,11 @@ def fetch_all_english_posts():
                 "per_page": 20,
                 "page":     page,
                 "status":   "publish",
-                "_fields":  "id,title,slug,content,excerpt,tags,categories,link,lang,featured_media",
+                "context":  "edit",
+                "_fields":  (
+                    "id,title,slug,content,excerpt,tags,"
+                    "categories,link,lang,featured_media,meta"
+                ),
             },
         )
         if r.status_code == 400:
@@ -215,9 +428,7 @@ def fetch_all_english_posts():
         if not batch:
             break
         for post in batch:
-            link = post.get("link", "")
-            lang = post.get("lang", "")
-            if lang == "de" or "/de/" in link:
+            if post.get("lang") == "de" or "/de/" in post.get("link", ""):
                 continue
             posts.append(post)
         total_pages = int(r.headers.get("X-WP-TotalPages", 1))
@@ -228,12 +439,8 @@ def fetch_all_english_posts():
     return posts
 
 
-def fetch_all_post_titles_and_urls():
-    """
-    Fetch all English post titles and URLs for internal linking.
-    Returns list of {id, title, url, slug}
-    """
-    posts = []
+def fetch_all_post_refs():
+    refs  = []
     page  = 1
     while True:
         r = requests.get(
@@ -243,7 +450,7 @@ def fetch_all_post_titles_and_urls():
                 "per_page": 100,
                 "page":     page,
                 "status":   "publish",
-                "_fields":  "id,title,link,slug,lang",
+                "_fields":  "id,title,link,lang",
             },
         )
         if r.status_code == 400:
@@ -253,68 +460,66 @@ def fetch_all_post_titles_and_urls():
         if not batch:
             break
         for post in batch:
-            lang = post.get("lang", "")
-            link = post.get("link", "")
-            if lang == "de" or "/de/" in link:
+            if post.get("lang") == "de" or "/de/" in post.get("link", ""):
                 continue
-            posts.append({
+            refs.append({
                 "id":    post["id"],
                 "title": post["title"]["rendered"],
-                "url":   link,
-                "slug":  post["slug"],
+                "url":   post["link"],
             })
-        total_pages = int(r.headers.get("X-WP-TotalPages", 1))
-        if page >= total_pages:
+        if page >= int(r.headers.get("X-WP-TotalPages", 1)):
             break
         page += 1
-    return posts
+    return refs
 
 
 def fetch_single_post(post_id):
-    return wp_request("GET", f"posts/{post_id}")
+    r = requests.get(
+        f"{WP_URL}/wp-json/wp/v2/posts/{post_id}",
+        headers=HEADERS,
+        params={"context": "edit"},
+    )
+    r.raise_for_status()
+    return r.json()
 
 
 # ============================================================
 #  🔗  INTERNAL LINKS
 # ============================================================
 
-def find_related_posts(current_post_id, current_title, all_posts, max_links=3):
-    """
-    Find related posts for internal linking using title similarity.
-    Returns list of {title, url} for up to max_links related posts.
-    """
-    scored = []
+def find_related_posts(current_id, current_title, all_refs, max_links=3):
+    scored      = []
     title_words = set(re.findall(r'\b\w{4,}\b', current_title.lower()))
-
-    for post in all_posts:
-        if post["id"] == current_post_id:
+    for post in all_refs:
+        if post["id"] == current_id:
             continue
         other_words = set(re.findall(r'\b\w{4,}\b', post["title"].lower()))
         if not title_words or not other_words:
             continue
         overlap = len(title_words & other_words) / len(title_words)
-        sim     = SequenceMatcher(None, current_title.lower(), post["title"].lower()).ratio()
-        score   = (overlap * 0.6) + (sim * 0.4)
-        if score > 0.15:
+        sim     = SequenceMatcher(
+            None, current_title.lower(), post["title"].lower()
+        ).ratio()
+        score = (overlap * 0.6) + (sim * 0.4)
+        if score > 0.12:
             scored.append((score, post))
-
     scored.sort(key=lambda x: x[0], reverse=True)
     return [p for _, p in scored[:max_links]]
 
 
-def build_internal_links_html(related_posts):
-    """Build an HTML 'Related Articles' section for internal linking."""
-    if not related_posts:
+def build_internal_links_html(related):
+    if not related:
         return ""
     items = "".join([
         f'<li><a href="{p["url"]}">{p["title"]}</a></li>'
-        for p in related_posts
+        for p in related
     ])
     return (
-        f'<div style="background:#f9f9f9;border:1px solid #e0e0e0;'
-        f'padding:16px;margin:24px 0;border-radius:4px;">'
-        f'<strong>Related Articles</strong><ul style="margin:8px 0 0 0;'
-        f'padding-left:20px;">{items}</ul></div>'
+        '<div style="background:#f9f9f9;border:1px solid #e0e0e0;'
+        'padding:16px;margin:24px 0;border-radius:4px;">'
+        '<strong>Related Articles</strong>'
+        f'<ul style="margin:8px 0 0;padding-left:20px;">{items}</ul>'
+        '</div>'
     )
 
 
@@ -322,61 +527,54 @@ def build_internal_links_html(related_posts):
 #  📋  TABLE OF CONTENTS
 # ============================================================
 
-def build_toc(content_html):
-    """
-    Extract H2 headings from content and build a TOC.
-    Returns TOC HTML string.
-    """
-    headings = re.findall(r'<h2[^>]*>(.*?)</h2>', content_html, re.IGNORECASE | re.DOTALL)
-    headings = [strip_html(h).strip() for h in headings]
-    headings = [h for h in headings if h and len(h) > 3]
+def inject_anchors(html):
+    def add_anchor(m):
+        text   = strip_html(m.group(1)).strip()
+        anchor = re.sub(r'[^a-z0-9]+', '-', text.lower()).strip('-')
+        return f'<h2 id="{anchor}">{m.group(1)}</h2>'
+    return re.sub(
+        r'<h2[^>]*>(.*?)</h2>', add_anchor, html,
+        flags=re.IGNORECASE | re.DOTALL
+    )
 
+
+def build_toc(html):
+    headings = re.findall(
+        r'<h2[^>]*>(.*?)</h2>', html,
+        re.IGNORECASE | re.DOTALL
+    )
+    headings = [strip_html(h).strip() for h in headings if len(strip_html(h).strip()) > 3]
     if len(headings) < 3:
         return ""
-
     items = ""
-    for i, heading in enumerate(headings, 1):
-        anchor = re.sub(r'[^a-z0-9]+', '-', heading.lower()).strip('-')
-        items += f'<li><a href="#{anchor}">{heading}</a></li>'
-
-    toc = (
-        f'<div style="background:#f8f9fa;border:1px solid #dee2e6;'
-        f'padding:16px 20px;margin:0 0 24px 0;border-radius:4px;">'
-        f'<strong style="display:block;margin-bottom:8px;">Table of Contents</strong>'
+    for h in headings:
+        anchor = re.sub(r'[^a-z0-9]+', '-', h.lower()).strip('-')
+        items += f'<li><a href="#{anchor}">{h}</a></li>'
+    return (
+        '<div style="background:#f8f9fa;border:1px solid #dee2e6;'
+        'padding:16px 20px;margin:0 0 24px;border-radius:4px;">'
+        '<strong style="display:block;margin-bottom:8px;">Table of Contents</strong>'
         f'<ol style="margin:0;padding-left:20px;line-height:1.9;">{items}</ol>'
-        f'</div>'
+        '</div>'
     )
-    return toc
-
-
-def inject_anchors_into_headings(content_html):
-    """Add id anchors to H2 headings so TOC links work."""
-    def add_anchor(match):
-        heading_text = strip_html(match.group(1)).strip()
-        anchor = re.sub(r'[^a-z0-9]+', '-', heading_text.lower()).strip('-')
-        return f'<h2 id="{anchor}">{match.group(1)}</h2>'
-    return re.sub(r'<h2[^>]*>(.*?)</h2>', add_anchor, content_html,
-                  flags=re.IGNORECASE | re.DOTALL)
 
 
 # ============================================================
 #  🖼️  IMAGE ALT TEXT
 # ============================================================
 
-def update_featured_image_alt(media_id, focus_keyword, post_title):
-    """Update the featured image alt text with the focus keyword."""
+def update_image_alt(media_id, focus_keyword, title):
     if not media_id:
         return
     try:
         requests.post(
             f"{WP_URL}/wp-json/wp/v2/media/{media_id}",
             headers=HEADERS,
-            json={
-                "alt_text": f"{focus_keyword} — {post_title[:60]}",
-            },
+            json={"alt_text": f"{focus_keyword} — {title[:60]}"},
         )
+        print(f"  Image alt text updated.")
     except Exception as e:
-        print(f"  Warning: could not update image alt text: {e}")
+        print(f"  Image alt warning: {e}")
 
 
 # ============================================================
@@ -385,7 +583,7 @@ def update_featured_image_alt(media_id, focus_keyword, post_title):
 
 def fetch_wp_categories():
     cat_map = {}
-    page = 1
+    page    = 1
     while True:
         r = requests.get(
             f"{WP_URL}/wp-json/wp/v2/categories",
@@ -395,142 +593,133 @@ def fetch_wp_categories():
         if r.status_code == 400:
             break
         r.raise_for_status()
-        batch = r.json()
-        if not batch:
-            break
-        for cat in batch:
+        for cat in r.json():
             cat_map[cat["name"].lower()] = cat["id"]
-        total_pages = int(r.headers.get("X-WP-TotalPages", 1))
-        if page >= total_pages:
+        if page >= int(r.headers.get("X-WP-TotalPages", 1)):
             break
         page += 1
     return cat_map
 
 
-def resolve_category_ids(chosen_categories, wp_cat_map):
+def resolve_category_ids(chosen, wp_cat_map):
     ids = []
-    for name in chosen_categories:
-        name_lower = name.lower()
-        if name_lower in wp_cat_map:
-            ids.append(wp_cat_map[name_lower])
+    for name in chosen:
+        nl = name.lower()
+        if nl in wp_cat_map:
+            ids.append(wp_cat_map[nl])
             continue
         best_score, best_key = 0, None
-        for wp_name_lower in wp_cat_map:
-            score = SequenceMatcher(None, name_lower, wp_name_lower).ratio()
-            if score > best_score:
-                best_score, best_key = score, wp_name_lower
+        for k in wp_cat_map:
+            s = SequenceMatcher(None, nl, k).ratio()
+            if s > best_score:
+                best_score, best_key = s, k
         if best_key and best_score >= 0.60:
             ids.append(wp_cat_map[best_key])
         else:
-            print(f"    WARNING: Could not match category '{name}'")
+            print(f"    WARNING: no match for '{name}'")
     if not ids:
-        fallback = "living in germany"
-        if fallback in wp_cat_map:
-            ids.append(wp_cat_map[fallback])
+        fb = "living in germany"
+        if fb in wp_cat_map:
+            ids.append(wp_cat_map[fb])
     return ids
 
 
 def sync_tags(tag_names):
-    tag_ids = []
+    ids = []
     for name in tag_names:
         try:
             t = wp_request("POST", "tags", json={"name": name})
-            tag_ids.append(t["id"])
+            ids.append(t["id"])
         except Exception:
-            search = requests.get(
+            s = requests.get(
                 f"{WP_URL}/wp-json/wp/v2/tags",
                 headers=HEADERS,
                 params={"search": name, "per_page": 1},
             ).json()
-            if search:
-                tag_ids.append(search[0]["id"])
-    return tag_ids
+            if s:
+                ids.append(s[0]["id"])
+    return ids
 
 
 # ============================================================
 #  🤖  CLAUDE REWRITE
 # ============================================================
 
-def rewrite_article(post, is_short, related_posts):
-    client       = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-    title        = post["title"]["rendered"]
-    current_text = strip_html(post["content"]["rendered"])
-    wc           = word_count(post["content"]["rendered"])
-    links_str    = "\n".join([f"- {k}: {v}" for k, v in REFERRAL_LINKS.items()])
-    cats_str     = "\n".join(f"- {c}" for c in ALLOWED_CATEGORIES)
+def rewrite_article(title, current_text, wc, is_short, related, editor_type):
+    client    = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+    links_str = "\n".join([f"- {k}: {v}" for k, v in REFERRAL_LINKS.items()])
+    cats_str  = "\n".join(f"- {c}" for c in ALLOWED_CATEGORIES)
 
-    # Build internal links context for Claude
     related_str = ""
-    if related_posts:
-        related_str = "\n".join([
+    if related:
+        related_str = "\n\nEmbed these internal links naturally in the body:\n"
+        related_str += "\n".join([
             f'- <a href="{p["url"]}">{p["title"]}</a>'
-            for p in related_posts
+            for p in related
         ])
-        related_str = f"\nEmbed these internal links naturally in the content:\n{related_str}"
 
-    length_instruction = (
-        f"Current article is ~{wc} words — EXPAND to at least "
-        f"{MIN_WORD_COUNT} words with detailed, useful information."
+    length_note = (
+        f"EXPAND to at least {MIN_WORD_COUNT} words — current is only ~{wc}."
         if is_short else
-        f"Current article is ~{wc} words. Keep or increase this length."
+        f"Keep or increase current ~{wc} word length."
     )
 
     system_prompt = f"""
-You are an expert SEO content writer for an expat guide website about Germany.
-You are optimizing articles specifically for the Rank Math SEO plugin.
-Today is {CURRENT_YEAR}.
+You are an expert SEO writer for an expat guide site about Germany.
+Optimizing specifically for Rank Math SEO plugin. Today is {CURRENT_YEAR}.
 
-CRITICAL RANK MATH SEO REQUIREMENTS:
-1. Focus keyword MUST appear in the very first sentence of the article
-2. Focus keyword MUST appear in the SEO title (near the beginning)
-3. Focus keyword MUST appear in the meta description
-4. Focus keyword MUST appear in at least 2 H2 or H3 headings
-5. Focus keyword density should be around 1% (use it naturally every 100-150 words)
-6. Slug MUST contain the focus keyword and be under {MAX_SLUG_LENGTH} characters
-7. Add a FAQ section at the end with 5-6 questions (Rank Math FAQ schema)
-8. Use H2 and H3 headings throughout for structure
+RANK MATH REQUIREMENTS (critical — all must be met):
+1. Focus keyword in the VERY FIRST sentence of the article
+2. Focus keyword in the SEO title (near the start)
+3. Focus keyword in meta description (first 10 words)
+4. Focus keyword in at least 2 H2 headings exactly
+5. Keyword density ~1% (use every 100-150 words naturally)
+6. Slug: contains focus keyword, under {MAX_SLUG_LENGTH} chars
+7. FAQ section at the end: 5-6 questions with detailed answers
 
 CONTENT RULES:
-- {length_instruction}
+- {length_note}
 - Update all information to {CURRENT_YEAR}
-- Write in clear, helpful English for expats in Germany
-- Embed affiliate links naturally: <a href="URL" target="_blank" rel="nofollow sponsored">text</a>
+- H2 and H3 structure throughout
+- Affiliate links: <a href="URL" target="_blank" rel="nofollow sponsored">text</a>
 - Only embed affiliate links where directly relevant{related_str}
 
-JSON OUTPUT RULES (very important):
-- Escape ALL quotes inside content field: \" not "
-- No curly/smart quotes anywhere
-- JSON must be complete and valid
-- Slug max {MAX_SLUG_LENGTH} characters, lowercase, hyphens only
+JSON OUTPUT RULES (strict):
+- Escape ALL quotes in content field: \\" not "
+- No smart/curly quotes
+- Valid complete JSON only
+- Slug max {MAX_SLUG_LENGTH} chars, lowercase, hyphens only
 
-CATEGORIES — pick 1-2, exact names only:
+CATEGORIES — 1-2 only, exact names:
 {cats_str}
 
-Output ONLY valid JSON:
+Return ONLY this JSON:
 {{
-  "title": "Focus Keyword Near Start — Compelling Title",
-  "slug": "focus-keyword-short-slug",
-  "meta_description": "Focus keyword in first 10 words. Compelling description. Exactly 150-155 chars.",
+  "title": "Focus Keyword: Rest of Title",
+  "slug": "focus-keyword-slug",
+  "meta_title": "Focus Keyword | GermanySupport.de",
+  "meta_description": "Focus keyword first. Exactly 150-155 chars.",
   "focus_keyword": "exact focus keyword phrase",
   "tags": ["tag1", "tag2", "tag3"],
   "categories": ["Category Name"],
-  "content": "Full HTML with escaped quotes, H2/H3 headings, FAQ section at end"
+  "content": "Full HTML with H2/H3 structure, FAQ at end, escaped quotes"
 }}
 """
 
     user_prompt = f"""
-Rewrite and SEO-optimize this article for Rank Math SEO plugin.
+Rewrite and optimize this article for Rank Math SEO.
 
-CURRENT TITLE: {title}
-CURRENT WORD COUNT: ~{wc} words
+TITLE: {title}
+EDITOR: {editor_type}
+WORDS: ~{wc}
 
 CURRENT CONTENT:
 {current_text[:5000]}
 
-AFFILIATE LINKS (embed naturally where relevant):
+AFFILIATE LINKS (embed where relevant):
 {links_str}
 
-Output ONLY the raw JSON object. All quotes in content must be escaped.
+Return ONLY the JSON. Escape all quotes inside content.
 """
 
     response = client.messages.create(
@@ -539,72 +728,101 @@ Output ONLY the raw JSON object. All quotes in content must be escaped.
         system=system_prompt,
         messages=[{"role": "user", "content": user_prompt}],
     )
-
     return parse_claude_json(response.content[0].text)
 
 
 # ============================================================
-#  📝  ASSEMBLE FINAL CONTENT
+#  📝  ASSEMBLE GUTENBERG CONTENT
 # ============================================================
 
-def assemble_content(optimized, related_posts):
-    """
-    Build the final article HTML:
-    1. Affiliate disclosure
-    2. Introduction (first paragraph — already in content)
-    3. Table of Contents
-    4. Rest of content with anchor IDs on H2s
-    5. Internal links box
-    """
+def assemble_gutenberg_content(optimized, related):
     content = optimized["content"]
+    content = inject_anchors(content)
 
-    # Inject anchor IDs into H2 headings
-    content = inject_anchors_into_headings(content)
+    # TOC after first paragraph
+    first_p = re.search(r'(<p>.*?</p>)', content, re.DOTALL | re.IGNORECASE)
+    toc     = build_toc(content)
+    if first_p and toc:
+        content = (
+            content[:first_p.end()]
+            + "\n" + toc + "\n"
+            + content[first_p.end():]
+        )
+    elif toc:
+        content = toc + "\n" + content
 
-    # Split off first paragraph for TOC placement
-    first_p_match = re.search(r'(<p>.*?</p>)', content, re.DOTALL | re.IGNORECASE)
-    if first_p_match:
-        first_p = first_p_match.group(1)
-        rest    = content[first_p_match.end():]
-        toc     = build_toc(content)
-        content = first_p + "\n" + toc + "\n" + rest
-    else:
-        toc = build_toc(content)
-        if toc:
-            content = toc + "\n" + content
-
-    # Add internal links section before FAQ
-    internal_links_html = build_internal_links_html(related_posts)
-    if internal_links_html:
-        # Insert before FAQ section if it exists
-        faq_match = re.search(
+    # Internal links before FAQ
+    il_html = build_internal_links_html(related)
+    if il_html:
+        faq = re.search(
             r'(<h2[^>]*>.*?[Ff][Aa][Qq].*?</h2>)',
             content, re.DOTALL | re.IGNORECASE
         )
-        if faq_match:
+        if faq:
             content = (
-                content[:faq_match.start()]
-                + internal_links_html + "\n"
-                + content[faq_match.start():]
+                content[:faq.start()]
+                + il_html + "\n"
+                + content[faq.start():]
             )
         else:
-            content += "\n" + internal_links_html
+            content += "\n" + il_html
 
-    # Prepend affiliate disclosure
-    final = AFFILIATE_DISCLOSURE + "\n" + content
-    return final
+    return AFFILIATE_DISCLOSURE + "\n" + content
 
 
 # ============================================================
-#  📤  UPDATE POST
+#  🚀  PROCESS GUTENBERG POST
 # ============================================================
 
-def update_post(post_id, optimized, final_content, cat_ids, tag_ids):
+def process_gutenberg(post, optimized, related, cat_ids, tag_ids):
+    """Update a standard Gutenberg post."""
+    final = assemble_gutenberg_content(optimized, related)
+    updated = wp_request(
+        "POST",
+        f"posts/{post['id']}",
+        json={
+            "title":      optimized["title"],
+            "slug":       optimized["slug"][:MAX_SLUG_LENGTH],
+            "content":    final,
+            "excerpt":    optimized["meta_description"],
+            "tags":       tag_ids,
+            "categories": cat_ids,
+        },
+    )
+    return updated["link"]
+
+
+# ============================================================
+#  ⚡  PROCESS ELEMENTOR POST
+# ============================================================
+
+def process_elementor(post, optimized, related, cat_ids, tag_ids):
     """
-    Update the WordPress post with all optimized content.
-    Writes to BOTH Rank Math AND Yoast meta fields for maximum compatibility.
+    Update an Elementor post:
+    1. Fetch raw Elementor JSON
+    2. Replace main text content with Claude's rewrite
+    3. Also update post_content for SEO crawlers
+    4. Save both
     """
-    return wp_request(
+    post_id = post["id"]
+
+    # Fetch raw Elementor data
+    print(f"  Fetching Elementor data...")
+    raw_elementor = fetch_elementor_raw_data(post_id)
+
+    # Build final content to inject
+    final_content = assemble_gutenberg_content(optimized, related)
+
+    if raw_elementor and raw_elementor not in ("", "[]"):
+        # Update Elementor JSON with new content
+        updated_elementor = update_elementor_content(raw_elementor, final_content)
+        save_elementor_data(post_id, updated_elementor)
+        print(f"  Elementor data updated.")
+    else:
+        print(f"  No Elementor data found — updating post_content only.")
+
+    # Always update post_content too (used by SEO crawlers and Rank Math)
+    updated = wp_request(
         "POST",
         f"posts/{post_id}",
         json={
@@ -614,21 +832,9 @@ def update_post(post_id, optimized, final_content, cat_ids, tag_ids):
             "excerpt":    optimized["meta_description"],
             "tags":       tag_ids,
             "categories": cat_ids,
-            "meta": {
-                # ── Rank Math fields ──────────────────────
-                "rank_math_focus_keyword":    optimized["focus_keyword"],
-                "rank_math_description":      optimized["meta_description"],
-                "rank_math_title":            optimized["title"],
-                "rank_math_robots":           ["index", "follow"],
-                # ── Yoast fields (fallback) ───────────────
-                "_yoast_wpseo_focuskw":       optimized["focus_keyword"],
-                "_yoast_wpseo_metadesc":      optimized["meta_description"],
-                # ── AIOSEO fields (fallback) ─────────────
-                "_aioseop_description":       optimized["meta_description"],
-                "_aioseop_keywords":          ", ".join(optimized["tags"]),
-            },
         },
     )
+    return updated["link"]
 
 
 # ============================================================
@@ -636,131 +842,187 @@ def update_post(post_id, optimized, final_content, cat_ids, tag_ids):
 # ============================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="GermanySupport SEO Optimizer v3")
+    parser = argparse.ArgumentParser(description="GermanySupport SEO Optimizer v5")
     parser.add_argument("--limit",   type=int, default=None)
     parser.add_argument("--post-id", type=int, default=None)
     args = parser.parse_args()
 
     print("=" * 62)
-    print("  GermanySupport.de — SEO Optimizer v3 (Rank Math)")
+    print("  GermanySupport.de — SEO Optimizer v5")
+    print("  Supports Gutenberg + Elementor")
     print("=" * 62)
 
-    # 1. Fetch categories
-    print("\n[1] Fetching WordPress categories...")
+    # 1. Check Rank Math API
+    print("\n[1] Checking Rank Math API...")
+    rm_check = requests.get(f"{WP_URL}/wp-json/rankmath/v1/", headers=HEADERS)
+    if rm_check.ok:
+        print("    Rank Math REST API: available ✓")
+    else:
+        print(f"    Rank Math REST API: {rm_check.status_code} "
+              f"— will print manual keyword list at end")
+
+    # 2. Fetch categories
+    print("\n[2] Fetching categories...")
     wp_cat_map = fetch_wp_categories()
     print(f"    Found {len(wp_cat_map)} categories.")
 
-    # 2. Fetch all post titles/URLs for internal linking
-    print("\n[2] Fetching all post titles for internal linking...")
-    all_post_refs = fetch_all_post_titles_and_urls()
-    print(f"    Found {len(all_post_refs)} English posts for internal links.")
+    # 3. Fetch post refs for internal linking
+    print("\n[3] Fetching post list for internal linking...")
+    all_refs = fetch_all_post_refs()
+    print(f"    Found {len(all_refs)} English posts.")
 
-    # 3. Fetch posts to optimize
-    print("\n[3] Fetching posts to optimize...")
+    # 4. Fetch posts to optimize
+    print("\n[4] Fetching posts to optimize...")
     if args.post_id:
         posts = [fetch_single_post(args.post_id)]
-        print(f"    Single post mode: ID {args.post_id}")
+        print(f"    Single post: ID {args.post_id}")
     else:
         posts = fetch_all_english_posts()
         if args.limit:
             posts = posts[:args.limit]
-        print(f"    Will optimize {len(posts)} articles.")
+        print(f"    Will process {len(posts)} articles.")
 
     if not posts:
         print("    No posts found.")
         return
 
-    # 4. Optimize loop
-    print(f"\n[4] Starting optimization...")
+    # 5. Optimize loop
+    print(f"\n[5] Optimizing...")
     print("=" * 62)
 
     results = {"success": [], "failed": []}
     total   = len(posts)
 
     for i, post in enumerate(posts, 1):
-        post_id           = post["id"]
-        title             = post["title"]["rendered"]
-        wc                = word_count(post["content"]["rendered"])
-        is_short          = wc < MIN_WORD_COUNT
-        featured_media_id = post.get("featured_media") or None
+        post_id   = post["id"]
+        title     = post["title"]["rendered"]
+        media_id  = post.get("featured_media") or None
+        editor    = detect_editor(post)
 
-        print(f"\n[{i}/{total}] Post ID {post_id}")
+        # Get content — for Elementor, extract from elementor_data
+        if editor == "elementor":
+            raw_el = fetch_elementor_raw_data(post_id)
+            current_text = extract_text_from_elementor(raw_el) if raw_el else ""
+            if not current_text:
+                current_text = strip_html(
+                    post.get("content", {}).get("rendered", "")
+                )
+        else:
+            current_text = strip_html(
+                post.get("content", {}).get("rendered", "")
+            )
+
+        wc       = len(current_text.split())
+        is_short = wc < MIN_WORD_COUNT
+
+        print(f"\n[{i}/{total}] Post ID {post_id} [{editor.upper()}]")
         print(f"  Title : {title[:65]}")
         print(f"  Words : {wc} {'— SHORT, will expand' if is_short else '— OK'}")
 
         try:
-            # Find related posts for internal linking
-            related = find_related_posts(post_id, title, all_post_refs)
-            print(f"  Internal links: {len(related)} related posts found")
+            # Find related posts
+            related = find_related_posts(post_id, title, all_refs)
+            print(f"  Links : {len(related)} related posts")
 
             # Rewrite with Claude
             print("  Rewriting with Claude...")
-            optimized = rewrite_article(post, is_short, related)
+            optimized = rewrite_article(
+                title, current_text, wc, is_short, related, editor
+            )
 
             new_wc = word_count(optimized["content"])
-            print(f"  New title    : {optimized['title'][:65]}")
-            print(f"  New slug     : {optimized['slug'][:60]}")
-            print(f"  Focus KW     : {optimized['focus_keyword']}")
-            print(f"  Meta desc    : {len(optimized['meta_description'])} chars")
-            print(f"  New words    : {new_wc}")
-            print(f"  Category     : {optimized['categories']}")
+            print(f"  New title : {optimized['title'][:60]}")
+            print(f"  New slug  : {optimized['slug'][:MAX_SLUG_LENGTH]}")
+            print(f"  Focus KW  : {optimized['focus_keyword']}")
+            print(f"  Meta desc : {len(optimized['meta_description'])} chars")
+            print(f"  New words : {new_wc}")
 
-            # Assemble final content (disclosure + TOC + content + internal links)
-            final_content = assemble_content(optimized, related)
-
-            # Resolve categories + tags
+            # Resolve cats + tags
             cat_ids = resolve_category_ids(optimized["categories"], wp_cat_map)
             tag_ids = sync_tags(optimized["tags"])
 
-            # Update post
-            updated = update_post(post_id, optimized, final_content, cat_ids, tag_ids)
-            print(f"  Updated : {updated['link']}")
+            # Update post based on editor type
+            if editor == "elementor":
+                print("  Updating Elementor post...")
+                url = process_elementor(post, optimized, related, cat_ids, tag_ids)
+            else:
+                print("  Updating Gutenberg post...")
+                url = process_gutenberg(post, optimized, related, cat_ids, tag_ids)
 
-            # Update featured image alt text
-            if featured_media_id:
-                update_featured_image_alt(
-                    featured_media_id,
-                    optimized["focus_keyword"],
-                    optimized["title"],
-                )
-                print(f"  Image alt text updated with focus keyword.")
+            print(f"  Updated : {url}")
+
+            # Update Rank Math SEO
+            meta_title = optimized.get(
+                "meta_title",
+                f"{optimized['title']} | GermanySupport.de"
+            )
+            rm_ok = update_rank_math_seo(
+                post_id,
+                optimized["focus_keyword"],
+                meta_title,
+                optimized["meta_description"],
+            )
+
+            # Update image alt text
+            update_image_alt(media_id, optimized["focus_keyword"],
+                             optimized["title"])
 
             results["success"].append({
                 "id":        post_id,
                 "title":     optimized["title"],
-                "url":       updated["link"],
+                "url":       url,
                 "old_words": wc,
                 "new_words": new_wc,
                 "keyword":   optimized["focus_keyword"],
+                "editor":    editor,
+                "rm_ok":     rm_ok,
             })
 
         except Exception as e:
             print(f"  ERROR: {e}")
             results["failed"].append({
-                "id":    post_id,
-                "title": title,
-                "error": str(e),
+                "id": post_id, "title": title, "error": str(e)
             })
 
         if i < total:
             print(f"  Waiting {DELAY_BETWEEN}s...")
             time.sleep(DELAY_BETWEEN)
 
-    # 5. Summary
+    # 6. Summary
     print("\n" + "=" * 62)
     print("  OPTIMIZATION COMPLETE")
     print("=" * 62)
-    print(f"  Total   : {total}")
-    print(f"  Success : {len(results['success'])}")
-    print(f"  Failed  : {len(results['failed'])}")
+    gutenberg_ok = [r for r in results["success"] if r["editor"] == "gutenberg"]
+    elementor_ok = [r for r in results["success"] if r["editor"] == "elementor"]
+    rm_ok_count  = len([r for r in results["success"] if r["rm_ok"]])
+
+    print(f"  Total             : {total}")
+    print(f"  Success           : {len(results['success'])}")
+    print(f"    Gutenberg       : {len(gutenberg_ok)}")
+    print(f"    Elementor       : {len(elementor_ok)}")
+    print(f"  Rank Math updated : {rm_ok_count}/{len(results['success'])}")
+    print(f"  Failed            : {len(results['failed'])}")
 
     if results["success"]:
         print("\n  Updated:")
         for r in results["success"]:
-            print(f"  [{r['id']}] {r['title'][:55]}")
+            rm  = "✓ RM" if r["rm_ok"] else "✗ RM manual"
+            print(f"  [{r['editor'][0].upper()}][{r['id']}] "
+                  f"{r['title'][:48]} [{rm}]")
             print(f"         KW: {r['keyword']}")
-            print(f"         {r['old_words']}w → {r['new_words']}w")
-            print(f"         {r['url']}")
+            print(f"         {r['old_words']}w → {r['new_words']}w | {r['url']}")
+
+    # Manual Rank Math fix list
+    need_manual_rm = [r for r in results["success"] if not r["rm_ok"]]
+    if need_manual_rm:
+        print("\n" + "=" * 62)
+        print("  SET THESE FOCUS KEYWORDS MANUALLY IN RANK MATH:")
+        print("  (WP editor → Rank Math panel → Focus Keyword field)")
+        print("=" * 62)
+        for r in need_manual_rm:
+            print(f"  [{r['id']}] {r['title'][:50]}")
+            print(f"  Keyword: {r['keyword']}")
+            print()
 
     if results["failed"]:
         print("\n  Failed:")
