@@ -35,25 +35,22 @@ WP_APP_PASS = os.environ["WP_APP_PASS"]
 LINK_MAP = {
     # BANKING
     "https://bit.ly/3IXPFSh": "https://germanysupport.de/go/n26",
-    "https://bit.ly/3EED0Uc": "https://germanysupport.de/go/c24bank",
-    "https://bit.ly/cmrzbnk": "https://germanysupport.de/go/commerzbank",
+    "https://bit.ly/3EED0Uc": "https://germanysupport.de/go/c24",
     "https://bit.ly/4hKu4ul": "https://germanysupport.de/go/advanzia",
-    "https://bit.ly/3wfHv0e": "https://germanysupport.de/go/amex",
-    "https://bit.ly/41xi8Ht": "https://germanysupport.de/go/creditcard-compare",
-    "https://bit.ly/gscrdt":  "https://germanysupport.de/go/creditcard-compare",
+    "https://bit.ly/41xi8Ht": "https://germanysupport.de/go/credit-cards",
+    "https://bit.ly/gscrdt":  "https://germanysupport.de/go/credit-cards",
     "https://bit.ly/3Z5B13n": "https://germanysupport.de/go/trade-republic",
-    "https://bit.ly/3MnUiFV": "https://germanysupport.de/go/metro",
     # INSURANCE
-    "https://bit.ly/3ik93KM": "https://germanysupport.de/go/liability-insurance",
-    "https://bit.ly/3IBfR1l": "https://germanysupport.de/go/getsafe",
+    "https://bit.ly/3ik93KM": "https://germanysupport.de/go/haftpflicht",
+    "https://bit.ly/3IBfR1l": "https://germanysupport.de/go/haftpflicht",
     "https://bit.ly/3tveWdm": "https://germanysupport.de/go/huk24",
-    "https://bit.ly/3IXJxXD": "https://germanysupport.de/go/car-insurance-compare",
+    "https://bit.ly/3IXJxXD": "https://germanysupport.de/go/car-insurance",
     # TAX
-    "https://bit.ly/3XDNBW8": "https://germanysupport.de/go/steuergotax",
-    "https://bit.ly/3NLm1BE": "https://germanysupport.de/go/wisotax",
+    "https://bit.ly/3XDNBW8": "https://germanysupport.de/go/steuergo",
+    "https://bit.ly/3NLm1BE": "https://germanysupport.de/go/wiso",
     # INTERNET & MOBILE
     "https://bit.ly/474daFa": "https://germanysupport.de/go/verivox-dsl",
-    "https://bit.ly/3MFz9WH": "https://germanysupport.de/go/check24-dsl",
+    "https://bit.ly/3MFz9WH": "https://germanysupport.de/go/dsl-check24",
     "https://bit.ly/4paMQ2e": "https://germanysupport.de/go/klarmobil",
     "https://bit.ly/3BVAAiI": "https://germanysupport.de/go/check24-mobile",
     "https://bit.ly/3iVS0mb": "https://germanysupport.de/go/congstar",
@@ -61,10 +58,10 @@ LINK_MAP = {
     "https://bit.ly/chk24strm": "https://germanysupport.de/go/electricity",
     "https://bit.ly/gasbgg":    "https://germanysupport.de/go/gas",
     # TRAVEL
-    "https://bit.ly/bgstrip": "https://germanysupport.de/go/check24-travel",
-    "https://bit.ly/mtwgn":   "https://germanysupport.de/go/check24-carrental",
+    "https://bit.ly/bgstrip": "https://germanysupport.de/go/travel",
+    "https://bit.ly/mtwgn":   "https://germanysupport.de/go/car-rental",
     # MONEY TRANSFER
-    "https://bit.ly/3qq18Ab": "https://germanysupport.de/go/ace-money",
+    "https://bit.ly/3qq18Ab": "https://germanysupport.de/go/ace",
     "https://bit.ly/3qj6JYG": "https://germanysupport.de/go/taptap",
     # CASHBACK
     "https://bit.ly/3r3tW1p": "https://germanysupport.de/go/shoop",
