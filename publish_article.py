@@ -80,40 +80,57 @@ ALLOWED_CATEGORIES = [
 #  📌  AFFILIATE / REFERRAL LINKS
 # ============================================================
 REFERRAL_LINKS = {
+    # GENERIC COMPARISON
+    "Tarifcheck":             "/go/tarifcheck",
+    "Check24":                "/go/check24",
+    "Verivox":                "/go/verivox",
+
     # BANKING
-    "N26 Bank":               "https://bit.ly/3IXPFSh",
-    "C24 Bank":               "https://bit.ly/3EED0Uc",
-    "Advanzia Mastercard":    "https://bit.ly/4hKu4ul",
-    "Credit Card Comparison": "https://bit.ly/41xi8Ht",
-    "Trade Republic":         "https://bit.ly/3Z5B13n",
-    "Scalable Capital":       "https://bit.ly/3KpHfnk"
+    "N26 Bank":               "/go/n26",
+    "C24 Bank":               "/go/c24",
+    "Advanzia Mastercard":    "/go/advanzia",
+    "Credit Card Comparison": "/go/credit-cards",
+    "Trade Republic":         "/go/trade-republic",
+    "Scalable Capital":       "/go/scalable-capital",
+    "PayPal":                 "/go/paypal",
+
     # INSURANCE
-    "Liability Insurance":    "https://bit.ly/3ik93KM",
-    "HUK24 Car Insurance":    "https://bit.ly/3tveWdm",
-    "Car Insurance Compare":  "https://bit.ly/3IXJxXD",
-    "Legal Insurance":        "https://bit.ly/3VioeX9"
+    "Liability Insurance":    "/go/haftpflicht",
+    "HUK24 Car Insurance":    "/go/huk24",
+    "Car Insurance Compare":  "/go/car-insurance",
+    "Legal Insurance":        "/go/legal-insurance",
+
     # TAX & FINANCE
-    "SteuerGo":               "https://bit.ly/3XDNBW8",
-    "WISO Steuer":            "https://bit.ly/3NLm1BE",
+    "SteuerGo":               "/go/steuergo",
+    "WISO Steuer":            "/go/wiso",
+
     # INTERNET & MOBILE
-    "Verivox DSL":            "https://bit.ly/474daFa",
-    "DSL Check24":            "https://bit.ly/3MFz9WH",
-    "Klarmobil":              "https://bit.ly/4paMQ2e",
-    "Check24 Mobile":         "https://bit.ly/3BVAAiI",
-    "Congstar Mobile":        "https://bit.ly/3iVS0mb",
+    "Verivox DSL":            "/go/verivox-dsl",
+    "DSL Check24":            "/go/dsl-check24",
+    "Klarmobil":              "/go/klarmobil",
+    "Check24 Mobile":         "/go/check24-mobile",
+    "Congstar Mobile":        "/go/congstar",
+    "Vodafone":               "/go/vodafone",
+    "Telekom Products":       "/go/telekom",
+    "Telekom Glasfaser / fiber optics": "/go/telekom-fiber",
+
     # UTILITIES
-    "Electricity Provider":   "https://bit.ly/chk24strm",
-    "Gas Provider":           "https://bit.ly/gasbgg",
+    "Electricity Provider":   "/go/electricity",
+    "Gas Provider":           "/go/gas",
+
     # TRAVEL
-    "Check24 Travel":         "https://bit.ly/bgstrip",
-    "Check24 Car Rental":     "https://bit.ly/mtwgn",
-    "Check24 Vacation":       "https://bit.ly/3ZlaoV0"
+    "Check24 Travel":         "/go/travel",
+    "Check24 Car Rental":     "/go/car-rental",
+    "Check24 Vacation":       "/go/vacation",
+
     # MONEY TRANSFER
-    "ACE Money Transfer":     "https://bit.ly/3qq18Ab",
-    "TapTap Send":            "https://bit.ly/3qj6JYG",
+    "ACE Money Transfer":     "/go/ace",
+    "TapTap Send Redeem code IQBAL12 and get €10,00 when you send €50,00 or more":            "/go/taptap",
+
     # CASHBACK
-    "Shoop Cashback":         "https://bit.ly/3r3tW1p",
-    "iGraal Cashback":        "https://bit.ly/38lWA7P",
+    "Shoop Cashback":         "/go/shoop",
+    "iGraal Cashback":        "/go/igraal",
+    "PAYBACK":                "/go/payback"
 }
 
 # ============================================================
@@ -129,35 +146,158 @@ SEED_TOPICS = [
     "How to build a credit score (Schufa) in Germany from scratch",
     "Sending money home from Germany: cheapest international transfer services",
     "Best cashback apps and websites in Germany to save money",
+    "How to open a joint bank account in Germany for couples",
+    "Blocked account (Sperrkonto) Germany: complete guide for students and visa applicants",
+    "How to close a bank account in Germany step by step",
+    "Best business bank accounts in Germany for freelancers and startups",
+    "How SEPA transfers work in Germany and Europe",
+    "PayPal vs bank transfer in Germany: which is better?",
+    "How to avoid bank fees in Germany",
+    "What is IBAN and BIC in Germany explained",
+    "How to set up direct debit (Lastschrift) in Germany",
+
     # INSURANCE
     "How to get liability insurance (Haftpflichtversicherung) in Germany",
     "Car insurance in Germany for foreigners: a complete guide",
     "Public vs private health insurance in Germany: which is better for expats?",
     "What is Hausratversicherung and do expats in Germany really need it?",
     "How to get dental insurance in Germany as an expat",
+    "Travel insurance for Germany: what expats need to know",
+    "Legal insurance (Rechtsschutzversicherung) in Germany explained",
+    "Best insurance comparison websites in Germany",
+    "Pet insurance in Germany: is it worth it?",
+    "How to cancel insurance contracts in Germany correctly",
+    "Accident insurance (Unfallversicherung) in Germany explained",
+    "What happens if you don’t have insurance in Germany",
+
     # TAX & LEGAL
     "How to file taxes in Germany as an expat (Steuererklärung guide)",
     "Tax classes in Germany explained: which Steuerklasse should you choose?",
     "Freelancer taxes in Germany: complete guide for self-employed expats",
     "How to get a tax ID (Steueridentifikationsnummer) in Germany",
     "Understanding your German payslip: Lohnabrechnung explained",
+    "How to use ELSTER for tax filing in Germany",
+    "Tax return deadlines in Germany 2025",
+    "What expenses can you deduct in Germany as an employee",
+    "Double taxation agreements: how to avoid paying tax twice",
+    "How to register as a freelancer (Freiberufler) in Germany",
+    "Difference between Gewerbe and Freiberufler in Germany",
+    "VAT (Umsatzsteuer) in Germany explained for beginners",
+    "How to declare foreign income in Germany",
+    "Child benefits (Kindergeld) in Germany: how to apply",
+
     # INTERNET & MOBILE
     "Best prepaid SIM cards in Germany for expats in 2025",
     "How to compare and switch internet providers in Germany",
     "Cheapest mobile phone plans in Germany: complete comparison",
     "How to set up internet at home in Germany: step-by-step guide",
+    "Best internet providers in Germany for expats",
+    "DSL vs cable vs fiber in Germany explained",
+    "How to cancel internet contract in Germany",
+    "Roaming rules in EU for Germany residents",
+    "Best eSIM providers for Germany",
+    "How to get WiFi without a long-term contract in Germany",
+
     # UTILITIES & LIVING
     "Cheapest electricity providers in Germany 2025: how to switch and save",
     "How to switch gas providers in Germany and save money",
     "How to register your address in Germany (Anmeldung): step-by-step guide",
     "How to find an apartment in Germany as a foreigner",
     "Understanding a German rental contract (Mietvertrag): what expats must know",
+    "Nebenkosten in Germany explained: what you really pay",
+    "How to deregister your address (Abmeldung) in Germany",
+    "How to get a parking permit in Germany",
+    "How to deal with landlords in Germany: tenant rights explained",
+    "What is Kaution and how to get it back in Germany",
+    "How to set up utilities when moving into a new apartment",
+    "How to avoid common rental scams in Germany",
+    "WG vs apartment in Germany: which is better for expats",
+    "How to buy furniture cheaply in Germany",
+
     # WORK & BUREAUCRACY
     "How to get a work visa in Germany: complete guide for non-EU citizens",
     "How to apply for permanent residency (Niederlassungserlaubnis) in Germany",
     "German driving licence for foreigners: how to convert or get a new one",
     "How to claim unemployment benefits (Arbeitslosengeld) in Germany",
     "How to bring your family to Germany: family reunification visa guide",
+    "EU Blue Card Germany: requirements and application process",
+    "Job seeker visa Germany: complete guide",
+    "How to register at the employment office (Agentur für Arbeit)",
+    "Minimum wage in Germany 2025: what you should know",
+    "How to write a German CV (Lebenslauf) for jobs",
+    "Best job portals in Germany for expats",
+    "How to prepare for job interviews in Germany",
+    "Recognition of foreign degrees in Germany (Anerkennung)",
+    "How to switch jobs in Germany as a visa holder",
+
+    # EDUCATION & STUDY
+    "How to study in Germany for free as an international student",
+    "Student visa Germany: requirements and process",
+    "Best universities in Germany for international students",
+    "How to apply to German universities step by step",
+    "DAAD scholarships: how to apply",
+    "Cost of living for students in Germany",
+    "How to work part-time as a student in Germany",
+    "How to extend student residence permit in Germany",
+
+    # FAMILY & SOCIAL LIFE
+    "How to apply for Kindergeld in Germany",
+    "Parental leave (Elternzeit) in Germany explained",
+    "How childcare (Kita) works in Germany",
+    "How to find a kindergarten in Germany",
+    "Benefits for families in Germany",
+    "Marriage in Germany for foreigners: requirements and process",
+    "Divorce process in Germany explained",
+    "How to register a newborn in Germany",
+
+    # HEALTHCARE
+    "How the healthcare system in Germany works",
+    "How to find a doctor in Germany as an expat",
+    "What to do in a medical emergency in Germany",
+    "How to get a sick note (Krankschreibung) in Germany",
+    "Pharmacies in Germany: how they work",
+    "How to book medical appointments in Germany",
+    "Mental health support in Germany for expats",
+
+    # TRANSPORT
+    "Public transport in Germany explained for beginners",
+    "Deutschlandticket explained: is it worth it?",
+    "How to buy train tickets in Germany (DB guide)",
+    "Car sharing in Germany: best providers",
+    "How to register a car in Germany",
+    "TÜV inspection in Germany explained",
+    "Parking rules in Germany you must know",
+    "Driving rules in Germany for foreigners",
+
+    # DIGITAL LIFE & SERVICES
+    "Best apps for living in Germany as an expat",
+    "How to use PayPal in Germany",
+    "How to shop online safely in Germany",
+    "Best websites to find jobs in Germany",
+    "How to use eBay Kleinanzeigen safely",
+    "Digital signature in Germany explained",
+
+    # SHOPPING & DAILY LIFE
+    "Best supermarkets in Germany: Aldi vs Lidl vs Rewe vs Edeka",
+    "How Pfand (bottle deposit) works in Germany",
+    "Cheapest places to shop groceries in Germany",
+    "Sunday shopping rules in Germany explained",
+    "How discounts and sales work in Germany",
+
+    # LANGUAGE & INTEGRATION
+    "How to learn German fast as an expat",
+    "Best free German learning resources",
+    "Integration courses in Germany explained",
+    "How to pass B1 German exam",
+    "Tips to integrate into German society",
+
+    # BUSINESS & FREELANCING
+    "How to start a business in Germany as a foreigner",
+    "Steps to register a Gewerbe in Germany",
+    "Best business ideas for expats in Germany",
+    "How to invoice clients in Germany",
+    "How to open a business bank account in Germany",
+    "Taxes for small businesses in Germany explained",
 ]
 
 # ============================================================
