@@ -83,17 +83,15 @@ REFERRAL_LINKS = {
     # BANKING
     "N26 Bank":               "https://bit.ly/3IXPFSh",
     "C24 Bank":               "https://bit.ly/3EED0Uc",
-    "Commerzbank":            "https://bit.ly/cmrzbnk",
     "Advanzia Mastercard":    "https://bit.ly/4hKu4ul",
-    "American Express":       "https://bit.ly/3wfHv0e",
     "Credit Card Comparison": "https://bit.ly/41xi8Ht",
     "Trade Republic":         "https://bit.ly/3Z5B13n",
-    "Metro Business":         "https://bit.ly/3MnUiFV",
+    "Scalable Capital":       "https://bit.ly/3KpHfnk"
     # INSURANCE
     "Liability Insurance":    "https://bit.ly/3ik93KM",
-    "Getsafe Haftpflicht":    "https://bit.ly/3IBfR1l",
     "HUK24 Car Insurance":    "https://bit.ly/3tveWdm",
     "Car Insurance Compare":  "https://bit.ly/3IXJxXD",
+    "Legal Insurance":        "https://bit.ly/3VioeX9"
     # TAX & FINANCE
     "SteuerGo":               "https://bit.ly/3XDNBW8",
     "WISO Steuer":            "https://bit.ly/3NLm1BE",
@@ -109,6 +107,7 @@ REFERRAL_LINKS = {
     # TRAVEL
     "Check24 Travel":         "https://bit.ly/bgstrip",
     "Check24 Car Rental":     "https://bit.ly/mtwgn",
+    "Check24 Vacation":       "https://bit.ly/3ZlaoV0"
     # MONEY TRANSFER
     "ACE Money Transfer":     "https://bit.ly/3qq18Ab",
     "TapTap Send":            "https://bit.ly/3qj6JYG",
