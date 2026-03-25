@@ -58,33 +58,40 @@ ALLOWED_CATEGORIES = [
 #  📌  AFFILIATE / REFERRAL LINKS
 # ============================================================
 REFERRAL_LINKS = {
-    "N26 Bank":               "https://bit.ly/3IXPFSh",
-    "C24 Bank":               "https://bit.ly/3EED0Uc",
-    "Commerzbank":            "https://bit.ly/cmrzbnk",
-    "Advanzia Mastercard":    "https://bit.ly/4hKu4ul",
-    "American Express":       "https://bit.ly/3wfHv0e",
-    "Credit Card Comparison": "https://bit.ly/41xi8Ht",
-    "Trade Republic":         "https://bit.ly/3Z5B13n",
-    "Metro Business":         "https://bit.ly/3MnUiFV",
-    "Liability Insurance":    "https://bit.ly/3ik93KM",
-    "Getsafe Haftpflicht":    "https://bit.ly/3IBfR1l",
-    "HUK24 Car Insurance":    "https://bit.ly/3tveWdm",
-    "Car Insurance Compare":  "https://bit.ly/3IXJxXD",
-    "SteuerGo":               "https://bit.ly/3XDNBW8",
-    "WISO Steuer":            "https://bit.ly/3NLm1BE",
-    "Verivox DSL":            "https://bit.ly/474daFa",
-    "DSL Check24":            "https://bit.ly/3MFz9WH",
-    "Klarmobil":              "https://bit.ly/4paMQ2e",
-    "Check24 Mobile":         "https://bit.ly/3BVAAiI",
-    "Congstar Mobile":        "https://bit.ly/3iVS0mb",
-    "Electricity Provider":   "https://bit.ly/chk24strm",
-    "Gas Provider":           "https://bit.ly/gasbgg",
-    "Check24 Travel":         "https://bit.ly/bgstrip",
-    "Check24 Car Rental":     "https://bit.ly/mtwgn",
-    "ACE Money Transfer":     "https://bit.ly/3qq18Ab",
-    "TapTap Send":            "https://bit.ly/3qj6JYG",
-    "Shoop Cashback":         "https://bit.ly/3r3tW1p",
-    "iGraal Cashback":        "https://bit.ly/38lWA7P",
+    "N26 Bank":               "https://germanysupport.de/go/n26",
+    "C24 Bank":               "https://germanysupport.de/go/c24",
+    "Commerzbank":            "https://germanysupport.de/go/n26",
+    "Advanzia Mastercard":    "https://germanysupport.de/go/advanzia",
+    "American Express":       "https://germanysupport.de/go/n26",
+    "Credit Card Comparison": "https://germanysupport.de/go/credit-cards",
+    "Trade Republic":         "https://germanysupport.de/go/trade-republic",
+    "Metro Business":         "https://germanysupport.de/go/credit-cards",
+    
+    "Liability Insurance":    "https://germanysupport.de/go/haftpflicht",
+    "Haftpflicht":    "https://germanysupport.de/go/haftpflicht",
+    "HUK24 Car Insurance":    "https://germanysupport.de/go/huk24",
+    "Car Insurance Compare":  "https://germanysupport.de/go/car-insurance",
+    
+    "SteuerGo":               "https://germanysupport.de/go/steuergo",
+    "WISO Steuer":            "https://germanysupport.de/go/wiso",
+    
+    "Verivox DSL":            "https://germanysupport.de/go/verivox-dsl",
+    "DSL Check24":            "https://germanysupport.de/go/dsl-check24",
+    "Klarmobil":              "https://germanysupport.de/go/klarmobil",
+    "Check24 Mobile":         "https://germanysupport.de/go/check24-mobile",
+    "Congstar Mobile":        "https://germanysupport.de/go/congstar",
+    
+    "Electricity Provider":   "https://germanysupport.de/go/electricity",
+    "Gas Provider":           "https://germanysupport.de/go/gas",
+    
+    "Check24 Travel":         "https://germanysupport.de/go/travel",
+    "Check24 Car Rental":     "https://germanysupport.de/go/car-rental",
+    
+    "ACE Money Transfer":     "https://germanysupport.de/go/ace",
+    "TapTap Send":            "https://germanysupport.de/go/taptap",
+    
+    "Shoop Cashback":         "https://germanysupport.de/go/shoop",
+    "iGraal Cashback":        "https://germanysupport.de/go/igraal",
 }
 
 # ============================================================
