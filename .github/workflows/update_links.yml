@@ -1,0 +1,54 @@
+name: Link Updater — Replace bit.ly with /go/ links
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run? (yes = preview only, no = actually save)"
+        required: false
+        default: "yes"
+      post_id:
+        description: "Single Post ID (leave empty for ALL posts)"
+        required: false
+        default: ""
+
+jobs:
+  update-links:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run dry run (preview only)
+        if: ${{ github.event.inputs.dry_run == 'yes' && github.event.inputs.post_id == '' }}
+        run: python update_links.py --dry-run
+        env:
+          WP_URL:      ${{ secrets.WP_URL }}
+          WP_USER:     ${{ secrets.WP_USER }}
+          WP_APP_PASS: ${{ secrets.WP_APP_PASS }}
+
+      - name: Run on all posts (save changes)
+        if: ${{ github.event.inputs.dry_run == 'no' && github.event.inputs.post_id == '' }}
+        run: python update_links.py
+        env:
+          WP_URL:      ${{ secrets.WP_URL }}
+          WP_USER:     ${{ secrets.WP_USER }}
+          WP_APP_PASS: ${{ secrets.WP_APP_PASS }}
+
+      - name: Run on single post (save changes)
+        if: ${{ github.event.inputs.post_id != '' }}
+        run: python update_links.py --post-id ${{ github.event.inputs.post_id }}
+        env:
+          WP_URL:      ${{ secrets.WP_URL }}
+          WP_USER:     ${{ secrets.WP_USER }}
+          WP_APP_PASS: ${{ secrets.WP_APP_PASS }}
