@@ -1,6 +1,10 @@
 name: SEO Optimizer — Rewrite & Update Articles
 
 on:
+  schedule:
+    - cron: "0 9 1 1 *"    # January 1st — start of year refresh
+    - cron: "0 9 1 5 *"    # May 1st — mid-year refresh
+    - cron: "0 9 1 9 *"    # September 1st — autumn refresh
   workflow_dispatch:
     inputs:
       limit:
@@ -11,15 +15,20 @@ on:
         description: "Single Post ID to optimize (leave empty for all)"
         required: false
         default: ""
+      force:
+        description: "Force rewrite all articles even if recently updated? (yes/no)"
+        required: false
+        default: "no"
 
 jobs:
   optimize:
     runs-on: ubuntu-latest
-    timeout-minutes: 120      # 45 articles × ~2 min each
+    timeout-minutes: 180
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4.2.2
+
       - name: Set up Python
         uses: actions/setup-python@v5.4.0
         with:
@@ -29,8 +38,17 @@ jobs:
         run: pip install anthropic requests
 
       - name: Optimize all articles
-        if: ${{ github.event.inputs.limit == '' && github.event.inputs.post_id == '' }}
+        if: ${{ github.event.inputs.limit == '' && github.event.inputs.post_id == '' && github.event.inputs.force != 'yes' }}
         run: python optimize_articles.py
+        env:
+          WP_URL:        ${{ secrets.WP_URL }}
+          WP_USER:       ${{ secrets.WP_USER }}
+          WP_APP_PASS:   ${{ secrets.WP_APP_PASS }}
+          ANTHROPIC_KEY: ${{ secrets.ANTHROPIC_KEY }}
+
+      - name: Optimize all articles (force)
+        if: ${{ github.event.inputs.force == 'yes' && github.event.inputs.post_id == '' }}
+        run: python optimize_articles.py --force
         env:
           WP_URL:        ${{ secrets.WP_URL }}
           WP_USER:       ${{ secrets.WP_USER }}
