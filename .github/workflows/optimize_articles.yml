@@ -3,8 +3,8 @@ name: SEO Optimizer — Rewrite & Update Articles
 on:
   schedule:
     - cron: "0 9 1 1 *"    # January 1st — start of year refresh
-    - cron: "0 9 1 5 *"    # May 1st — mid-year refresh
-    - cron: "0 9 1 9 *"    # September 1st — autumn refresh
+    # - cron: "0 9 1 5 *"    # May 1st — mid-year refresh
+    # - cron: "0 9 1 9 *"    # September 1st — autumn refresh
   workflow_dispatch:
     inputs:
       limit:
