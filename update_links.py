@@ -53,7 +53,7 @@ LINK_MAP = {
     "https://bit.ly/3MFz9WH": "https://germanysupport.de/go/dsl-check24",
     "https://bit.ly/4paMQ2e": "https://germanysupport.de/go/klarmobil",
     "https://bit.ly/3BVAAiI": "https://germanysupport.de/go/check24-mobile",
-    "https://bit.ly/3iVS0mb": "https://germanysupport.de/go/congstar",
+    "https://bit.ly/3iVS0mb": "https://germanysupport.de/go/check24-mobile",
     # UTILITIES
     "https://bit.ly/chk24strm": "https://germanysupport.de/go/electricity",
     "https://bit.ly/gasbgg":    "https://germanysupport.de/go/gas",
