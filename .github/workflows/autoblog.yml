@@ -5,6 +5,9 @@ on:
     - cron: "0 9 * * MON"   # Every Monday at 9:00 AM UTC
     - cron: "0 9 * * THU"   # Every Thursday at 9:00 AM UTC
   workflow_dispatch:          # Manual trigger
+  
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   publish:

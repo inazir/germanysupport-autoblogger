@@ -2,9 +2,8 @@ name: SEO Optimizer — Rewrite & Update Articles
 
 on:
   schedule:
-    - cron: "0 9 1 1 *"    # January 1st — start of year refresh
-    # - cron: "0 9 1 5 *"    # May 1st — mid-year refresh
-    # - cron: "0 9 1 9 *"    # September 1st — autumn refresh
+    - cron: "0 9 1 1 *"    # January 1st
+    - cron: "0 9 1 7 *"    # July 1st
   workflow_dispatch:
     inputs:
       limit:
@@ -12,13 +11,16 @@ on:
         required: false
         default: ""
       post_id:
-        description: "Single Post ID to optimize (leave empty for all)"
+        description: "Single Post ID (leave empty for all)"
         required: false
         default: ""
       force:
-        description: "Force rewrite all articles even if recently updated? (yes/no)"
+        description: "Force rewrite all even if recently updated? (yes/no)"
         required: false
         default: "no"
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   optimize:
@@ -27,10 +29,10 @@ jobs:
 
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4.2.2
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5.4.0
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
