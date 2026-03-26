@@ -1,76 +1,822 @@
-name: SEO Optimizer — Rewrite & Update Articles
+"""
+GermanySupport.de — SEO Optimizer (Production)
+================================================
+Features:
+  - --days N  → skip articles modified in the last N days (default: 120)
+  - --force   → rewrite everything regardless of date
+  - Dynamic referral links from WordPress API (config.py)
+  - Custom /wp-json/gs/v1/set-keyword endpoint for Rank Math
+  - Rank Math FAQ schema markup
+  - Gutenberg + Elementor support
+  - Structured logging
+  - Retry on network errors
 
-on:
-  schedule:
-    - cron: "0 9 1 1 *"    # January 1st
-    - cron: "0 9 1 7 *"    # July 1st
-  workflow_dispatch:
-    inputs:
-      limit:
-        description: "Number of articles to optimize (leave empty for ALL)"
-        required: false
-        default: ""
-      post_id:
-        description: "Single Post ID (leave empty for all)"
-        required: false
-        default: ""
-      force:
-        description: "Force rewrite all even if recently updated? (yes/no)"
-        required: false
-        default: "no"
+Usage:
+  python optimize_articles.py                   # skip articles from last 120 days
+  python optimize_articles.py --days 7          # skip articles from last 7 days
+  python optimize_articles.py --days 1          # skip only today's articles
+  python optimize_articles.py --force           # rewrite everything
+  python optimize_articles.py --limit 5         # first 5 only (test)
+  python optimize_articles.py --post-id 123     # single post
+"""
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+import os
+import re
+import sys
+import json
+import time
+import base64
+import logging
+import argparse
+from datetime import datetime, timezone, timedelta
+from difflib import SequenceMatcher
 
-jobs:
-  optimize:
-    runs-on: ubuntu-latest
-    timeout-minutes: 180
+import anthropic
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+from config import (
+    CURRENT_YEAR,
+    ALLOWED_CATEGORIES,
+    get_relevant_links,
+    fetch_referral_links,
+    format_links_as_html,
+    TAPTAP_PROMO_TEXT,
+    TAPTAP_PROMO_HTML,
+)
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+# ============================================================
+#  📝  LOGGING
+# ============================================================
+log_dir = os.path.join(os.path.dirname(__file__), "logs")
+os.makedirs(log_dir, exist_ok=True)
 
-      - name: Install dependencies
-        run: pip install anthropic requests
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(
+            os.path.join(log_dir, "optimize.log"), encoding="utf-8"
+        ),
+    ],
+)
+log = logging.getLogger(__name__)
 
-      - name: Optimize all articles
-        if: ${{ github.event.inputs.limit == '' && github.event.inputs.post_id == '' && github.event.inputs.force != 'yes' }}
-        run: python optimize_articles.py
-        env:
-          WP_URL:        ${{ secrets.WP_URL }}
-          WP_USER:       ${{ secrets.WP_USER }}
-          WP_APP_PASS:   ${{ secrets.WP_APP_PASS }}
-          ANTHROPIC_KEY: ${{ secrets.ANTHROPIC_KEY }}
+# ============================================================
+#  🔑  CREDENTIALS
+# ============================================================
+WP_URL        = os.environ["WP_URL"].rstrip("/")
+WP_USER       = os.environ["WP_USER"]
+WP_APP_PASS   = os.environ["WP_APP_PASS"]
+ANTHROPIC_KEY = os.environ["ANTHROPIC_KEY"]
 
-      - name: Optimize all articles (force)
-        if: ${{ github.event.inputs.force == 'yes' && github.event.inputs.post_id == '' }}
-        run: python optimize_articles.py --force
-        env:
-          WP_URL:        ${{ secrets.WP_URL }}
-          WP_USER:       ${{ secrets.WP_USER }}
-          WP_APP_PASS:   ${{ secrets.WP_APP_PASS }}
-          ANTHROPIC_KEY: ${{ secrets.ANTHROPIC_KEY }}
+# ============================================================
+#  ⚙️  DEFAULTS
+# ============================================================
+DEFAULT_SKIP_DAYS = 120   # ~4 months
+MIN_WORD_COUNT    = 1200
+DELAY_BETWEEN     = 12
+MAX_SLUG_LENGTH   = 60
+TIMEOUT           = 60
 
-      - name: Optimize limited articles
-        if: ${{ github.event.inputs.limit != '' && github.event.inputs.post_id == '' }}
-        run: python optimize_articles.py --limit ${{ github.event.inputs.limit }}
-        env:
-          WP_URL:        ${{ secrets.WP_URL }}
-          WP_USER:       ${{ secrets.WP_USER }}
-          WP_APP_PASS:   ${{ secrets.WP_APP_PASS }}
-          ANTHROPIC_KEY: ${{ secrets.ANTHROPIC_KEY }}
+# ============================================================
+#  🔄  HTTP SESSION WITH RETRY
+# ============================================================
 
-      - name: Optimize single post
-        if: ${{ github.event.inputs.post_id != '' }}
-        run: python optimize_articles.py --post-id ${{ github.event.inputs.post_id }}
-        env:
-          WP_URL:        ${{ secrets.WP_URL }}
-          WP_USER:       ${{ secrets.WP_USER }}
-          WP_APP_PASS:   ${{ secrets.WP_APP_PASS }}
-          ANTHROPIC_KEY: ${{ secrets.ANTHROPIC_KEY }}
+def build_session():
+    s = requests.Session()
+    r = Retry(total=5, backoff_factor=20,
+              status_forcelist=[500, 502, 503, 504],
+              allowed_methods=["GET", "POST", "PUT", "DELETE"],
+              raise_on_status=False)
+    a = HTTPAdapter(max_retries=r)
+    s.mount("https://", a)
+    s.mount("http://",  a)
+    return s
+
+SESSION = build_session()
+
+
+def build_headers():
+    token = base64.b64encode(f"{WP_USER}:{WP_APP_PASS}".encode()).decode()
+    return {"Authorization": f"Basic {token}", "Content-Type": "application/json"}
+
+HEADERS = build_headers()
+
+
+def wp_get(url, **kw):
+    kw.setdefault("timeout", TIMEOUT)
+    r = SESSION.get(url, headers=HEADERS, **kw)
+    r.raise_for_status()
+    return r
+
+
+def wp_post_req(url, **kw):
+    kw.setdefault("timeout", TIMEOUT)
+    r = SESSION.post(url, headers=HEADERS, **kw)
+    if not r.ok:
+        raise Exception(f"POST {r.status_code}: {r.text[:300]}")
+    return r
+
+
+def wp_request(method, endpoint, **kw):
+    kw.setdefault("timeout", TIMEOUT)
+    url = f"{WP_URL}/wp-json/wp/v2/{endpoint}"
+    r   = SESSION.request(method, url, headers=HEADERS, **kw)
+    if not r.ok:
+        raise Exception(f"WP {r.status_code}: {r.text[:300]}")
+    return r.json()
+
+
+def strip_html(html):
+    return re.sub(r"<[^>]+>", " ", html or "")
+
+
+def word_count(text):
+    return len(strip_html(text).split())
+
+
+# ============================================================
+#  📅  DATE HELPERS
+# ============================================================
+
+def parse_wp_date(s):
+    try:
+        return datetime.strptime(s, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+def should_skip(post, skip_days):
+    """Return True if the post was modified within the last skip_days days."""
+    if skip_days <= 0:
+        return False
+    d = parse_wp_date(post.get("modified_gmt", "") or "")
+    if not d:
+        return False
+    cutoff = datetime.now(timezone.utc) - timedelta(days=skip_days)
+    return d > cutoff
+
+
+# ============================================================
+#  🎯  RANK MATH KEYWORD SETTER
+# ============================================================
+
+def set_rank_math_keyword(post_id, keyword, meta_title, meta_description):
+    # Method 1: custom Code Snippets endpoint
+    try:
+        r = wp_post_req(
+            f"{WP_URL}/wp-json/gs/v1/set-keyword",
+            json={"post_id": post_id, "keyword": keyword,
+                  "title": meta_title, "description": meta_description})
+        if r.ok and r.json().get("success"):
+            log.info(f"  Rank Math: keyword set ✓  [{keyword}]")
+            return True
+    except Exception as e:
+        log.warning(f"  Custom endpoint: {e}")
+
+    # Method 2: native Rank Math API
+    try:
+        r2 = wp_post_req(
+            f"{WP_URL}/wp-json/rankmath/v1/updateMeta",
+            json={"objectID": post_id, "objectType": "post",
+                  "meta": {"rank_math_focus_keyword": keyword,
+                            "rank_math_title":         meta_title,
+                            "rank_math_description":   meta_description}})
+        if r2.ok:
+            log.info(f"  Rank Math: keyword set via native API ✓")
+            return True
+    except Exception as e:
+        log.warning(f"  Native API: {e}")
+
+    log.warning(f"  Rank Math FAILED — set manually: '{keyword}'")
+    return False
+
+
+# ============================================================
+#  🔍  EDITOR DETECTION
+# ============================================================
+
+def detect_editor(post):
+    meta = post.get("meta", {})
+    if meta.get("_elementor_edit_mode") == "builder":
+        return "elementor"
+    data = meta.get("_elementor_data", "")
+    if data and data not in ("", "[]", None):
+        return "elementor"
+    return "gutenberg"
+
+
+# ============================================================
+#  🧩  ELEMENTOR HELPERS
+# ============================================================
+
+def extract_text_from_elementor(raw):
+    try: data = json.loads(raw)
+    except Exception: return ""
+    texts = []
+
+    def traverse(obj):
+        if isinstance(obj, list):
+            for i in obj: traverse(i)
+        elif isinstance(obj, dict):
+            wt = obj.get("widgetType", "")
+            s  = obj.get("settings", {})
+            if wt in ("text-editor", "theme-post-content"):
+                c = s.get("editor", "") or s.get("content", "")
+                if c: texts.append(strip_html(c))
+            elif wt == "heading":
+                t = s.get("title", "")
+                if t: texts.append(strip_html(t))
+            elif wt == "accordion":
+                for item in s.get("tabs", []):
+                    texts.append(strip_html(item.get("tab_title", "")))
+                    texts.append(strip_html(item.get("tab_content", "")))
+            for k in ("elements", "children"):
+                if k in obj: traverse(obj[k])
+
+    traverse(data)
+    return " ".join(t for t in texts if t.strip())
+
+
+def update_elementor_content(raw, new_html):
+    try: data = json.loads(raw)
+    except Exception: return raw
+    updated = [False]
+
+    def traverse(obj):
+        if isinstance(obj, list):
+            for i in obj: traverse(i)
+        elif isinstance(obj, dict):
+            if obj.get("widgetType") == "text-editor" and not updated[0]:
+                obj["settings"]["editor"] = new_html
+                updated[0] = True
+            for k in ("elements", "children"):
+                if k in obj: traverse(obj[k])
+
+    traverse(data)
+    return json.dumps(data, ensure_ascii=False)
+
+
+def fetch_elementor_raw(post_id):
+    r = wp_get(f"{WP_URL}/wp-json/wp/v2/posts/{post_id}",
+               params={"context": "edit", "_fields": "meta"})
+    return r.json().get("meta", {}).get("_elementor_data", "") or ""
+
+
+def save_elementor(post_id, data_str):
+    r = wp_post_req(f"{WP_URL}/wp-json/wp/v2/posts/{post_id}",
+                    json={"meta": {"_elementor_data": data_str}})
+    if not r.ok:
+        raise Exception(f"Elementor save failed: {r.status_code}")
+
+
+# ============================================================
+#  🧹  JSON PARSER
+# ============================================================
+
+def parse_claude_json(raw):
+    text = raw.strip()
+    for p in [r"^```json\s*", r"^```\s*", r"```$"]:
+        text = re.sub(p, "", text).strip()
+    try: return json.loads(text)
+    except json.JSONDecodeError: pass
+    m = re.search(r'\{.*\}', text, re.DOTALL)
+    if m:
+        try: return json.loads(m.group(0))
+        except json.JSONDecodeError: pass
+    fixed = re.sub(r',\s*([}\]])', r'\1', text)
+    fixed = fixed.replace('\u201c', '"').replace('\u201d', '"')
+    fixed = fixed.replace('\u2018', "'").replace('\u2019', "'")
+    try: return json.loads(fixed)
+    except json.JSONDecodeError: pass
+    log.warning("JSON malformed — asking Claude to repair...")
+    client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+    repair = client.messages.create(
+        model="claude-sonnet-4-20250514", max_tokens=4096,
+        messages=[{"role": "user", "content":
+            "Fix this malformed JSON. Return ONLY valid JSON:\n\n" + text[:3000]}])
+    r2 = repair.content[0].text.strip()
+    r2 = re.sub(r"^```json\s*", "", r2)
+    r2 = re.sub(r"```$", "", r2).strip()
+    return json.loads(r2)
+
+
+# ============================================================
+#  🔗  LINK VERIFICATION & INJECTION
+# ============================================================
+
+def verify_links(html, links):
+    return [(n, u) for n, u in links.items() if u not in html]
+
+
+def inject_missing_links(html, missing):
+    if not missing: return html
+    log.info(f"  Pass 3: injecting {len(missing)} missing links...")
+    client    = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+    links_str = "\n".join([
+        f"- TapTap Send (promo {TAPTAP_PROMO_TEXT.split('(')[1].rstrip(')')}: {u}"
+        if n == "TapTap Send" else f"- {n}: {u}"
+        for n, u in missing])
+    r = client.messages.create(
+        model="claude-sonnet-4-20250514", max_tokens=4096,
+        system="""Embed affiliate links into HTML content naturally.
+Use: <a href="URL" target="_blank" rel="nofollow sponsored">CTA text</a>
+For TapTap Send: mention promo code IQBAL12 and €10 bonus near the link.
+Return COMPLETE HTML unchanged except for added links. No disclosure boxes.""",
+        messages=[{"role": "user", "content":
+            f"Add these links:\n{links_str}\n\nARTICLE:\n{html}"}])
+    result = r.content[0].text.strip()
+    result = re.sub(r"^```html\s*", "", result)
+    result = re.sub(r"```$", "", result).strip()
+    return result
+
+
+# ============================================================
+#  📥  FETCH POSTS
+# ============================================================
+
+def fetch_all_english_posts():
+    posts, page = [], 1
+    log.info("  Fetching English posts...")
+    while True:
+        r = wp_get(f"{WP_URL}/wp-json/wp/v2/posts", params={
+            "per_page": 20, "page": page, "status": "publish",
+            "context": "edit",
+            "_fields": "id,title,slug,content,excerpt,tags,categories,"
+                       "link,lang,featured_media,meta,modified_gmt"})
+        if r.status_code == 400: break
+        batch = r.json()
+        if not batch: break
+        for p in batch:
+            if p.get("lang") == "de" or "/de/" in p.get("link", ""): continue
+            posts.append(p)
+        total = int(r.headers.get("X-WP-TotalPages", 1))
+        log.info(f"  Page {page}/{total} — {len(posts)} EN posts")
+        if page >= total: break
+        page += 1
+    return posts
+
+
+def fetch_all_post_refs():
+    refs, page = [], 1
+    while True:
+        r = wp_get(f"{WP_URL}/wp-json/wp/v2/posts", params={
+            "per_page": 100, "page": page, "status": "publish",
+            "_fields": "id,title,link,lang"})
+        if r.status_code == 400: break
+        batch = r.json()
+        if not batch: break
+        for p in batch:
+            if p.get("lang") == "de" or "/de/" in p.get("link", ""): continue
+            refs.append({"id": p["id"],
+                         "title": p["title"]["rendered"],
+                         "url": p["link"]})
+        if page >= int(r.headers.get("X-WP-TotalPages", 1)): break
+        page += 1
+    return refs
+
+
+def fetch_single_post(post_id):
+    return wp_get(f"{WP_URL}/wp-json/wp/v2/posts/{post_id}",
+                  params={"context": "edit"}).json()
+
+
+# ============================================================
+#  🔗  INTERNAL LINKS
+# ============================================================
+
+def find_related(cur_id, cur_title, all_refs, max_links=3):
+    scored, tw = [], set(re.findall(r'\b\w{4,}\b', cur_title.lower()))
+    for p in all_refs:
+        if p["id"] == cur_id: continue
+        ow = set(re.findall(r'\b\w{4,}\b', p["title"].lower()))
+        if not tw or not ow: continue
+        ov  = len(tw & ow) / len(tw)
+        sim = SequenceMatcher(None, cur_title.lower(), p["title"].lower()).ratio()
+        if ov * 0.6 + sim * 0.4 > 0.12:
+            scored.append((ov * 0.6 + sim * 0.4, p))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [p for _, p in scored[:max_links]]
+
+
+def build_internal_links_html(related):
+    if not related: return ""
+    items = "".join([f'<li><a href="{p["url"]}">{p["title"]}</a></li>' for p in related])
+    return (
+        '<div style="background:#f9f9f9;border:1px solid #e0e0e0;'
+        'padding:16px;margin:24px 0;border-radius:4px;">'
+        '<strong>Related Articles</strong>'
+        f'<ul style="margin:8px 0 0;padding-left:20px;">{items}</ul></div>'
+    )
+
+
+# ============================================================
+#  📋  TABLE OF CONTENTS
+# ============================================================
+
+def inject_anchors(html):
+    def add(m):
+        text   = strip_html(m.group(1)).strip()
+        anchor = re.sub(r'[^a-z0-9]+', '-', text.lower()).strip('-')
+        return f'<h2 id="{anchor}">{m.group(1)}</h2>'
+    return re.sub(r'<h2[^>]*>(.*?)</h2>', add, html, flags=re.IGNORECASE | re.DOTALL)
+
+
+def build_toc(html):
+    hs = [strip_html(h).strip() for h in
+          re.findall(r'<h2[^>]*>(.*?)</h2>', html, re.IGNORECASE | re.DOTALL)]
+    hs = [h for h in hs if len(h) > 3]
+    if len(hs) < 3: return ""
+    items = "".join([
+        f'<li><a href="#{re.sub(chr(91)+"^a-z0-9"+chr(93)+"+","-",h.lower()).strip("-")}">{h}</a></li>'
+        for h in hs])
+    return (
+        '<div style="background:#f8f9fa;border:1px solid #dee2e6;'
+        'padding:16px 20px;margin:0 0 24px;border-radius:4px;">'
+        '<strong style="display:block;margin-bottom:8px;">Table of Contents</strong>'
+        f'<ol style="margin:0;padding-left:20px;line-height:1.9;">{items}</ol></div>'
+    )
+
+
+# ============================================================
+#  🖼️  IMAGE ALT TEXT
+# ============================================================
+
+def update_image_alt(media_id, keyword, title):
+    if not media_id: return
+    try:
+        wp_post_req(f"{WP_URL}/wp-json/wp/v2/media/{media_id}",
+                    json={"alt_text": f"{keyword} — {title[:60]}"})
+        log.info("  Image alt text updated.")
+    except Exception as e:
+        log.warning(f"  Image alt: {e}")
+
+
+# ============================================================
+#  📂  CATEGORIES & TAGS
+# ============================================================
+
+def fetch_wp_categories():
+    cat_map, page = {}, 1
+    while True:
+        r = wp_get(f"{WP_URL}/wp-json/wp/v2/categories",
+                   params={"per_page": 100, "page": page, "_fields": "id,name"})
+        if r.status_code == 400: break
+        for c in r.json(): cat_map[c["name"].lower()] = c["id"]
+        if page >= int(r.headers.get("X-WP-TotalPages", 1)): break
+        page += 1
+    return cat_map
+
+
+def resolve_cats(chosen, cat_map):
+    ids = []
+    for name in chosen:
+        nl = name.lower()
+        if nl in cat_map: ids.append(cat_map[nl]); continue
+        best_s, best_k = 0, None
+        for k in cat_map:
+            s = SequenceMatcher(None, nl, k).ratio()
+            if s > best_s: best_s, best_k = s, k
+        if best_k and best_s >= 0.60: ids.append(cat_map[best_k])
+    if not ids and "living in germany" in cat_map:
+        ids.append(cat_map["living in germany"])
+    return ids
+
+
+def sync_tags(names):
+    ids = []
+    for name in names:
+        try: ids.append(wp_request("POST", "tags", json={"name": name})["id"])
+        except Exception:
+            s = wp_get(f"{WP_URL}/wp-json/wp/v2/tags",
+                       params={"search": name, "per_page": 1}).json()
+            if s: ids.append(s[0]["id"])
+    return ids
+
+
+# ============================================================
+#  🤖  CLAUDE — TWO-PASS REWRITE
+# ============================================================
+
+def claude_call(system_prompt, user_prompt, max_tokens=4096):
+    client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+    r = client.messages.create(
+        model="claude-sonnet-4-20250514", max_tokens=max_tokens,
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_prompt}])
+    return r.content[0].text.strip()
+
+
+def rewrite_pass1(title, curr_text, wc, is_short, related, rel_links):
+    links_html  = format_links_as_html(rel_links)
+    cats_str    = "\n".join(f"- {c}" for c in ALLOWED_CATEGORIES)
+    target      = max(MIN_WORD_COUNT, wc)
+    length_note = (
+        f"EXPAND to at least {MIN_WORD_COUNT} words — currently ~{wc}."
+        if is_short else f"Write {target}+ words. Do NOT shorten."
+    )
+    related_str = ""
+    if related:
+        related_str = "\n\nEmbed these INTERNAL links:\n"
+        related_str += "\n".join([
+            f'- <a href="{p["url"]}">{p["title"]}</a>' for p in related])
+
+    system = f"""
+You are an expert SEO writer for germanysupport.de (expat guide, Germany).
+Optimizing for Rank Math SEO. Year: {CURRENT_YEAR}.
+
+RANK MATH TARGET SCORE: 80+
+1. Focus keyword in VERY FIRST sentence
+2. Focus keyword near start of title
+3. Focus keyword in meta description (first 10 words)
+4. Focus keyword in AT LEAST 2 H2 headings exactly
+5. ~1% keyword density
+6. Slug: focus keyword, under {MAX_SLUG_LENGTH} chars
+7. Short paragraphs (2-4 sentences)
+8. Include comparison table (HTML <table>) if comparing options
+
+CONTENT:
+- {length_note}
+- Update ALL info to {CURRENT_YEAR}
+- Strong CTAs near affiliate links
+- Do NOT add FAQ (separate pass)
+- No affiliate disclosure box
+
+AFFILIATE LINKS — ALL MANDATORY:
+{links_html}{related_str}
+
+TAPTAP RULE: always mention promo code IQBAL12 + €10 bonus for €50+.
+
+JSON RULES: escape quotes in content: \\" not "
+CATEGORIES (1-2, exact): {cats_str}
+
+Return ONLY JSON:
+{{
+  "title": "KW-rich Title {CURRENT_YEAR}",
+  "slug": "kw-slug-max-60",
+  "meta_title": "Keyword | GermanySupport.de",
+  "meta_description": "Keyword first. 150-155 chars exactly.",
+  "focus_keyword": "keyword phrase",
+  "tags": ["t1","t2","t3","t4","t5"],
+  "categories": ["Category"],
+  "content": "Complete HTML — tables, CTAs, all affiliate links, NO FAQ"
+}}
+"""
+    user = f"""
+Rewrite for Rank Math 80+ score. Year: {CURRENT_YEAR}.
+TITLE: {title}
+WORDS: ~{wc} → target {target}+
+CONTENT: {curr_text}
+ALL affiliate links MANDATORY. TapTap: include IQBAL12 promo.
+Return COMPLETE JSON only.
+"""
+    return parse_claude_json(claude_call(system, user))
+
+
+def rewrite_pass2_faq(title, keyword, summary):
+    system = f"""
+Write FAQ for expat guides about Germany ({CURRENT_YEAR}).
+Use Rank Math FAQ schema markup:
+<div class="rank-math-faq-item">
+  <h3 class="rank-math-question">Question?</h3>
+  <div class="rank-math-answer"><p>Answer in 2-4 sentences.</p></div>
+</div>
+Start with: <h2 id="faq">Frequently Asked Questions</h2>
+5-6 questions. Include keyword in 1-2. Accurate for {CURRENT_YEAR}.
+Return ONLY HTML.
+"""
+    user = f"FAQ for: {title}\nKeyword: {keyword}\nSummary: {summary[:1000]}"
+    return claude_call(system, user, max_tokens=1200)
+
+
+# ============================================================
+#  📝  ASSEMBLE CONTENT
+# ============================================================
+
+def assemble_content(optimized, related):
+    content = inject_anchors(optimized["content"])
+    first_p = re.search(r'(<p>.*?</p>)', content, re.DOTALL | re.IGNORECASE)
+    toc     = build_toc(content)
+    if first_p and toc:
+        content = content[:first_p.end()] + "\n" + toc + "\n" + content[first_p.end():]
+    elif toc:
+        content = toc + "\n" + content
+    il = build_internal_links_html(related)
+    if il:
+        faq = re.search(r'(<h2[^>]*>.*?[Ff][Aa][Qq].*?</h2>)',
+                        content, re.DOTALL | re.IGNORECASE)
+        if faq:
+            content = content[:faq.start()] + il + "\n" + content[faq.start():]
+        else:
+            content += "\n" + il
+    return content
+
+
+# ============================================================
+#  📤  UPDATE POSTS
+# ============================================================
+
+def update_wp_post(pid, optimized, final, cat_ids, tag_ids):
+    return wp_request("POST", f"posts/{pid}", json={
+        "title":      optimized["title"],
+        "slug":       optimized["slug"][:MAX_SLUG_LENGTH],
+        "content":    final,
+        "excerpt":    optimized["meta_description"],
+        "tags":       tag_ids,
+        "categories": cat_ids,
+    })
+
+
+def process_elementor(post, optimized, final, cat_ids, tag_ids):
+    pid = post["id"]
+    raw = fetch_elementor_raw(pid)
+    if raw and raw not in ("", "[]"):
+        save_elementor(pid, update_elementor_content(raw, final))
+        log.info("  Elementor data updated.")
+    return update_wp_post(pid, optimized, final, cat_ids, tag_ids)
+
+
+# ============================================================
+#  🚀  MAIN
+# ============================================================
+
+def main():
+    parser = argparse.ArgumentParser(description="GermanySupport SEO Optimizer")
+    parser.add_argument("--limit",   type=int,  default=None,
+                        help="Max articles to process")
+    parser.add_argument("--post-id", type=int,  default=None,
+                        help="Optimize a single post by ID")
+    parser.add_argument("--days",    type=int,  default=DEFAULT_SKIP_DAYS,
+                        help=f"Skip articles modified in the last N days "
+                             f"(default: {DEFAULT_SKIP_DAYS}). Use 0 to disable.")
+    parser.add_argument("--force",   action="store_true",
+                        help="Rewrite ALL articles regardless of modified date "
+                             "(equivalent to --days 0)")
+    args = parser.parse_args()
+
+    skip_days = 0 if args.force else args.days
+
+    log.info("=" * 60)
+    log.info(f"GermanySupport SEO Optimizer — {CURRENT_YEAR}")
+    log.info(f"Skip articles modified in last: {skip_days} days")
+    log.info("=" * 60)
+
+    # Warm up referral links
+    log.info("[1] Fetching referral links from WordPress...")
+    fetch_referral_links(WP_URL)
+
+    # Check custom endpoint
+    log.info("[2] Checking Rank Math custom endpoint...")
+    try:
+        test = wp_post_req(f"{WP_URL}/wp-json/gs/v1/set-keyword",
+                           json={"post_id": 0, "keyword": "test"})
+        log.info("    Custom endpoint: available ✓")
+    except Exception as e:
+        if "400" in str(e) or "missing" in str(e).lower():
+            log.info("    Custom endpoint: available ✓")
+        else:
+            log.warning(f"    Custom endpoint unavailable: {e}")
+
+    log.info("[3] Fetching categories...")
+    cat_map = fetch_wp_categories()
+
+    log.info("[4] Fetching post refs for internal linking...")
+    all_refs = fetch_all_post_refs()
+
+    log.info("[5] Fetching posts to optimize...")
+    if args.post_id:
+        posts = [fetch_single_post(args.post_id)]
+        log.info(f"    Single post: ID {args.post_id}")
+        skip_days = 0  # always process if explicit post-id
+    else:
+        posts = fetch_all_english_posts()
+        if args.limit:
+            posts = posts[:args.limit]
+        log.info(f"    Found {len(posts)} English posts.")
+
+    # Apply skip filter
+    if skip_days > 0:
+        before = len(posts)
+        posts  = [p for p in posts if not should_skip(p, skip_days)]
+        log.info(f"    Skipped {before - len(posts)} posts (modified in last {skip_days} days).")
+        log.info(f"    Will optimize {len(posts)} posts.")
+
+    if not posts:
+        log.info("Nothing to optimize. Lower --days or use --force.")
+        return
+
+    log.info(f"[6] Optimizing {len(posts)} articles...")
+    log.info("=" * 60)
+
+    results = {"success": [], "failed": []}
+    total   = len(posts)
+
+    for i, post in enumerate(posts, 1):
+        pid      = post["id"]
+        title    = post["title"]["rendered"]
+        media_id = post.get("featured_media") or None
+        editor   = detect_editor(post)
+        modified = post.get("modified_gmt", "")[:10]
+
+        if editor == "elementor":
+            raw_el = fetch_elementor_raw(pid)
+            curr   = extract_text_from_elementor(raw_el) if raw_el else ""
+            if not curr:
+                curr = strip_html(post.get("content", {}).get("rendered", ""))
+        else:
+            curr = strip_html(post.get("content", {}).get("rendered", ""))
+
+        wc       = len(curr.split())
+        is_short = wc < MIN_WORD_COUNT
+
+        log.info(f"\n[{i}/{total}] Post {pid} [{editor.upper()}] mod:{modified}")
+        log.info(f"  Title : {title[:65]}")
+        log.info(f"  Words : {wc} {'— SHORT' if is_short else '— OK'}")
+
+        try:
+            rel_links = get_relevant_links(title, curr, WP_URL)
+            related   = find_related(pid, title, all_refs)
+            log.info(f"  Links : {len(rel_links)} affiliate | {len(related)} internal")
+
+            log.info("  Pass 1: rewriting...")
+            optimized = rewrite_pass1(title, curr, wc, is_short, related, rel_links)
+
+            missing = verify_links(optimized["content"], rel_links)
+            log.info(f"  Links : {len(rel_links)-len(missing)}/{len(rel_links)} present")
+            if missing:
+                optimized["content"] = inject_missing_links(
+                    optimized["content"], missing)
+                still = verify_links(optimized["content"], rel_links)
+                log.info(f"  Links : {len(rel_links)-len(still)}/{len(rel_links)} after injection")
+
+            log.info("  Pass 2: FAQ...")
+            faq = rewrite_pass2_faq(
+                optimized["title"],
+                optimized["focus_keyword"],
+                strip_html(optimized["content"])[:2000])
+            optimized["content"] += "\n" + faq
+
+            new_wc = word_count(optimized["content"])
+            log.info(f"  KW    : {optimized['focus_keyword']}")
+            log.info(f"  Words : {wc} → {new_wc}")
+
+            final   = assemble_content(optimized, related)
+            cat_ids = resolve_cats(optimized["categories"], cat_map)
+            tag_ids = sync_tags(optimized["tags"])
+
+            if editor == "elementor":
+                updated = process_elementor(post, optimized, final, cat_ids, tag_ids)
+            else:
+                updated = update_wp_post(pid, optimized, final, cat_ids, tag_ids)
+
+            url = updated["link"]
+            log.info(f"  Saved : {url}")
+
+            meta_title = optimized.get(
+                "meta_title", f"{optimized['title']} | GermanySupport.de")
+            rm_ok = set_rank_math_keyword(
+                pid, optimized["focus_keyword"], meta_title,
+                optimized["meta_description"])
+
+            update_image_alt(media_id, optimized["focus_keyword"], optimized["title"])
+
+            results["success"].append({
+                "id": pid, "title": optimized["title"], "url": url,
+                "old_words": wc, "new_words": new_wc,
+                "keyword": optimized["focus_keyword"],
+                "editor": editor, "rm_ok": rm_ok,
+            })
+
+        except Exception as e:
+            log.error(f"  ERROR on post {pid}: {e}")
+            results["failed"].append({"id": pid, "title": title, "error": str(e)})
+
+        if i < total:
+            time.sleep(DELAY_BETWEEN)
+
+    # Summary
+    log.info("\n" + "=" * 60)
+    log.info(f"COMPLETE — {CURRENT_YEAR}")
+    rm_n = len([r for r in results["success"] if r["rm_ok"]])
+    log.info(f"  Success      : {len(results['success'])}/{total}")
+    log.info(f"  Keyword set  : {rm_n}/{len(results['success'])}")
+    log.info(f"  Failed       : {len(results['failed'])}")
+
+    need_rm = [r for r in results["success"] if not r["rm_ok"]]
+    if need_rm:
+        log.warning("SET FOCUS KEYWORDS MANUALLY IN RANK MATH:")
+        for r in need_rm:
+            log.warning(f"  [{r['id']}] {r['keyword']} → {r['url']}")
+
+    if results["failed"]:
+        log.error("Failed posts:")
+        for r in results["failed"]:
+            log.error(f"  [{r['id']}] {r['title'][:55]} — {r['error'][:80]}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

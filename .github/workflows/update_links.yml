@@ -1,56 +1,276 @@
-name: Link Updater — Replace bit.ly with /go/ links
+"""
+GermanySupport.de — Link Updater (Production)
+==============================================
+Scans all published posts and replaces old affiliate links
+with the current /go/* redirect links.
 
-on:
-  workflow_dispatch:
-    inputs:
-      dry_run:
-        description: "Dry run? (yes = preview only, no = actually save)"
-        required: false
-        default: "yes"
-      post_id:
-        description: "Single Post ID (leave empty for ALL posts)"
-        required: false
-        default: ""
+Link mapping is fetched dynamically from WordPress
+(via /wp-json/gs/v1/referral-links) so no hardcoding needed.
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+Usage:
+  python update_links.py                    # update all posts
+  python update_links.py --dry-run          # preview only
+  python update_links.py --post-id 123      # single post
+"""
 
-jobs:
-  update-links:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+import os
+import re
+import sys
+import base64
+import logging
+import argparse
 
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4.2.2
-      - name: Set up Python
-        uses: actions/setup-python@v5.4.0
-        with:
-          python-version: "3.11"
+import requests
 
-      - name: Install dependencies
-        run: pip install requests
+from config import fetch_referral_links, STATIC_FALLBACK_LINKS
 
-      - name: Run dry run (preview only)
-        if: ${{ github.event.inputs.dry_run == 'yes' && github.event.inputs.post_id == '' }}
-        run: python update_links.py --dry-run
-        env:
-          WP_URL:      ${{ secrets.WP_URL }}
-          WP_USER:     ${{ secrets.WP_USER }}
-          WP_APP_PASS: ${{ secrets.WP_APP_PASS }}
+# ============================================================
+#  📝  LOGGING
+# ============================================================
+log_dir = os.path.join(os.path.dirname(__file__), "logs")
+os.makedirs(log_dir, exist_ok=True)
 
-      - name: Run on all posts (save changes)
-        if: ${{ github.event.inputs.dry_run == 'no' && github.event.inputs.post_id == '' }}
-        run: python update_links.py
-        env:
-          WP_URL:      ${{ secrets.WP_URL }}
-          WP_USER:     ${{ secrets.WP_USER }}
-          WP_APP_PASS: ${{ secrets.WP_APP_PASS }}
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(
+            os.path.join(log_dir, "update_links.log"), encoding="utf-8"
+        ),
+    ],
+)
+log = logging.getLogger(__name__)
 
-      - name: Run on single post (save changes)
-        if: ${{ github.event.inputs.post_id != '' }}
-        run: python update_links.py --post-id ${{ github.event.inputs.post_id }}
-        env:
-          WP_URL:      ${{ secrets.WP_URL }}
-          WP_USER:     ${{ secrets.WP_USER }}
-          WP_APP_PASS: ${{ secrets.WP_APP_PASS }}
+# ============================================================
+#  🔑  CREDENTIALS
+# ============================================================
+WP_URL      = os.environ["WP_URL"].rstrip("/")
+WP_USER     = os.environ["WP_USER"]
+WP_APP_PASS = os.environ["WP_APP_PASS"]
+
+# ============================================================
+#  🔧  AUTH
+# ============================================================
+
+def build_headers():
+    token = base64.b64encode(f"{WP_USER}:{WP_APP_PASS}".encode()).decode()
+    return {"Authorization": f"Basic {token}", "Content-Type": "application/json"}
+
+HEADERS = build_headers()
+
+# ============================================================
+#  🗺️  BUILD LINK REPLACEMENT MAP
+#  Old links (bit.ly + old full germanysupport.de/go/ paths)
+#  → new /go/ redirect links fetched from WordPress API.
+# ============================================================
+
+# Historical bit.ly links that may still exist in old articles
+BITLY_TO_SLUG = {
+    "https://bit.ly/3IXPFSh": "go/n26",
+    "https://bit.ly/3EED0Uc": "go/c24",
+    "https://bit.ly/cmrzbnk": "go/commerzbank",    # will be excluded
+    "https://bit.ly/4hKu4ul": "go/advanzia",
+    "https://bit.ly/3wfHv0e": "go/amex",           # excluded
+    "https://bit.ly/41xi8Ht": "go/credit-cards",
+    "https://bit.ly/gscrdt":  "go/credit-cards",
+    "https://bit.ly/3Z5B13n": "go/trade-republic",
+    "https://bit.ly/3MnUiFV": "go/metro",          # excluded
+    "https://bit.ly/3ik93KM": "go/haftpflicht",
+    "https://bit.ly/3IBfR1l": "go/getsafe",        # excluded
+    "https://bit.ly/3tveWdm": "go/huk24",
+    "https://bit.ly/3IXJxXD": "go/car-insurance",
+    "https://bit.ly/3XDNBW8": "go/steuergo",
+    "https://bit.ly/3NLm1BE": "go/wiso",
+    "https://bit.ly/474daFa": "go/verivox-dsl",
+    "https://bit.ly/3MFz9WH": "go/dsl-check24",
+    "https://bit.ly/4paMQ2e": "go/klarmobil",
+    "https://bit.ly/3BVAAiI": "go/check24-mobile",
+    "https://bit.ly/3iVS0mb": "go/congstar",       # excluded
+    "https://bit.ly/chk24strm": "go/electricity",
+    "https://bit.ly/gasbgg":   "go/gas",
+    "https://bit.ly/bgstrip":  "go/travel",
+    "https://bit.ly/mtwgn":    "go/car-rental",
+    "https://bit.ly/3qq18Ab":  "go/ace",
+    "https://bit.ly/3qj6JYG":  "go/taptap",
+    "https://bit.ly/3r3tW1p":  "go/shoop",
+    "https://bit.ly/38lWA7P":  "go/igraal",
+}
+
+
+def build_replacement_map(live_links: dict) -> dict:
+    """
+    Build {old_url: new_url} replacement map.
+    old_urls = bit.ly links + any stale germanysupport.de/go/ paths
+    new_urls = current live /go/* URLs from WordPress
+    Excluded slugs are mapped to None and those entries are removed.
+    """
+    replacement_map = {}
+
+    for old_url, slug in BITLY_TO_SLUG.items():
+        new_url = live_links.get(slug)
+        if new_url:
+            replacement_map[old_url] = new_url
+
+    # Also replace any stale internal links that point to old slugs
+    # e.g. https://germanysupport.de/go/n26bank → /go/n26
+    for slug, new_url in live_links.items():
+        # Build possible old internal variants
+        short = slug.replace("go/", "")
+        stale_variants = [
+            f"{WP_URL}/{slug}",          # current slug (no change needed but harmless)
+            f"{WP_URL}/go/{short}bank",  # e.g. /go/n26bank → /go/n26
+            f"{WP_URL}/go/{short}-en",
+        ]
+        for old in stale_variants:
+            if old != new_url and old not in replacement_map:
+                replacement_map[old] = new_url
+
+    return replacement_map
+
+
+def replace_links_in_html(html: str, replacement_map: dict) -> tuple[str, int]:
+    """Replace all old links in HTML. Returns (new_html, count_replaced)."""
+    count = 0
+    for old, new in replacement_map.items():
+        if old in html:
+            occurrences = html.count(old)
+            html   = html.replace(old, new)
+            count += occurrences
+    return html, count
+
+
+# ============================================================
+#  📥  FETCH POSTS
+# ============================================================
+
+def fetch_all_posts():
+    posts, page = [], 1
+    log.info("  Fetching all published posts...")
+    while True:
+        r = requests.get(
+            f"{WP_URL}/wp-json/wp/v2/posts", headers=HEADERS,
+            params={"per_page": 20, "page": page, "status": "publish",
+                    "context": "edit",
+                    "_fields": "id,title,content,link"}, timeout=30)
+        if r.status_code == 400: break
+        r.raise_for_status()
+        batch = r.json()
+        if not batch: break
+        posts.extend(batch)
+        total = int(r.headers.get("X-WP-TotalPages", 1))
+        log.info(f"  Page {page}/{total} — {len(posts)} posts")
+        if page >= total: break
+        page += 1
+    return posts
+
+
+def fetch_single_post(post_id):
+    r = requests.get(f"{WP_URL}/wp-json/wp/v2/posts/{post_id}",
+                     headers=HEADERS,
+                     params={"context": "edit"}, timeout=20)
+    r.raise_for_status()
+    return r.json()
+
+
+def update_post_content(post_id, new_content):
+    r = requests.post(f"{WP_URL}/wp-json/wp/v2/posts/{post_id}",
+                      headers=HEADERS, json={"content": new_content}, timeout=30)
+    if not r.ok:
+        raise Exception(f"Update failed: {r.status_code} {r.text[:200]}")
+    return r.json()
+
+
+# ============================================================
+#  🚀  MAIN
+# ============================================================
+
+def main():
+    parser = argparse.ArgumentParser(description="GermanySupport Link Updater")
+    parser.add_argument("--dry-run",  action="store_true",
+                        help="Preview changes without saving")
+    parser.add_argument("--post-id", type=int, default=None,
+                        help="Update a single post by ID")
+    args = parser.parse_args()
+
+    log.info("=" * 60)
+    log.info("GermanySupport — Referral Link Updater")
+    if args.dry_run:
+        log.info("MODE: DRY RUN — no changes will be saved")
+    log.info("=" * 60)
+
+    # Fetch live links from WordPress
+    log.info("Fetching current referral links from WordPress API...")
+    live_links = fetch_referral_links(WP_URL)
+    log.info(f"  Found {len(live_links)} active /go/* links.")
+
+    # Build replacement map
+    replacement_map = build_replacement_map(live_links)
+    log.info(f"  Built replacement map with {len(replacement_map)} entries.")
+
+    if not replacement_map:
+        log.warning("No replacements to make. Are bit.ly links still present?")
+        return
+
+    # Fetch posts
+    if args.post_id:
+        posts = [fetch_single_post(args.post_id)]
+        log.info(f"Single post mode: ID {args.post_id}")
+    else:
+        posts = fetch_all_posts()
+        log.info(f"Found {len(posts)} posts to scan.")
+
+    log.info("=" * 60)
+
+    results = {"updated": [], "no_change": [], "failed": []}
+    total_replacements = 0
+
+    for i, post in enumerate(posts, 1):
+        pid     = post["id"]
+        title   = post["title"]["rendered"]
+        content = (post.get("content", {}).get("raw", "") or
+                   post.get("content", {}).get("rendered", ""))
+
+        new_content, count = replace_links_in_html(content, replacement_map)
+
+        if count == 0:
+            results["no_change"].append(pid)
+            continue
+
+        total_replacements += count
+        log.info(f"[{i}] Post {pid}: {count} replacement(s) — {title[:55]}")
+
+        if args.dry_run:
+            log.info("  (dry run — not saved)")
+            results["updated"].append({"id": pid, "title": title, "count": count})
+        else:
+            try:
+                update_post_content(pid, new_content)
+                log.info("  Saved ✓")
+                results["updated"].append({
+                    "id": pid, "title": title, "count": count,
+                    "url": post.get("link", "")})
+            except Exception as e:
+                log.error(f"  FAILED: {e}")
+                results["failed"].append({"id": pid, "title": title, "error": str(e)})
+
+    log.info("=" * 60)
+    log.info("LINK UPDATE COMPLETE")
+    log.info("=" * 60)
+    log.info(f"  Scanned    : {len(posts)}")
+    log.info(f"  Updated    : {len(results['updated'])}")
+    log.info(f"  No change  : {len(results['no_change'])}")
+    log.info(f"  Replacements: {total_replacements}")
+    log.info(f"  Failed     : {len(results['failed'])}")
+
+    if args.dry_run:
+        log.info("(DRY RUN — run without --dry-run to save changes)")
+
+    if results["failed"]:
+        for r in results["failed"]:
+            log.error(f"  [{r['id']}] {r['title'][:55]}: {r['error'][:80]}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

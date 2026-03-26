@@ -1,32 +1,57 @@
 """
-GermanySupport.de — AutoBlogger
-================================
-Imports shared config from config.py (single source of truth).
-Reads all credentials from environment variables (GitHub Secrets).
+GermanySupport.de — AutoBlogger (Production)
+=============================================
+Features:
+  - Dynamic referral links from WordPress API (config.py)
+  - Duplicate detection: title similarity + slug check
+  - High-conversion article strategy (money pages first)
+  - TapTap IQBAL12 promo code
+  - Auto-year
+  - Structured logging
 
-Schedule: Monday + Thursday at 9am UTC via autoblog.yml
+Usage:
+  python publish_article.py
+  python publish_article.py --topic "Custom topic here"
 """
 
 import os
 import re
+import sys
 import json
 import random
 import base64
-import sys
+import logging
+import argparse
 from difflib import SequenceMatcher
+from datetime import datetime
 
 import anthropic
 import requests
 
-# Import shared config
 from config import (
     CURRENT_YEAR,
     ALLOWED_CATEGORIES,
-    REFERRAL_LINKS,
     get_relevant_links,
+    fetch_referral_links,
     format_links_for_prompt,
     TAPTAP_PROMO_TEXT,
 )
+
+# ============================================================
+#  📝  LOGGING
+# ============================================================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(
+            os.path.join(os.path.dirname(__file__), "logs", "publish.log"),
+            encoding="utf-8",
+        ) if os.path.isdir(os.path.join(os.path.dirname(__file__), "logs")) else logging.StreamHandler(),
+    ],
+)
+log = logging.getLogger(__name__)
 
 # ============================================================
 #  🔑  CREDENTIALS
@@ -38,15 +63,56 @@ ANTHROPIC_KEY = os.environ["ANTHROPIC_KEY"]
 PEXELS_KEY    = os.environ["PEXELS_KEY"]
 
 # ============================================================
-#  🌱  SEED TOPIC POOL
+#  💎  HIGH-CONVERSION MONEY PAGES (prioritised topic pool)
+#  These topics have high affiliate conversion potential.
+#  They are tried first before the general seed pool.
+# ============================================================
+HIGH_CONVERSION_TOPICS = [
+    # BANKING
+    "Best Free Bank Accounts in Germany for Expats 2026: N26 vs C24 Comparison",
+    "N26 vs C24 Bank: Which Is Better for Expats in Germany?",
+    "Best Banks for Expats in Germany: Complete Guide 2026",
+    "How to Open N26 Account in Germany: Step-by-Step Guide",
+    # CREDIT CARDS
+    "Best Credit Cards in Germany for Foreigners 2026",
+    "Advanzia Mastercard Germany: Zero-Fee Credit Card Review",
+    "Best No-Fee Credit Cards in Germany: Complete Comparison",
+    # INSURANCE
+    "Best Liability Insurance (Haftpflicht) in Germany: Top Providers Compared",
+    "Cheapest Car Insurance in Germany 2026: How to Save Up to €850",
+    "Best Legal Insurance (Rechtsschutz) in Germany for Expats",
+    # INTERNET & MOBILE
+    "Best DSL Internet Providers in Germany 2026: Prices & Speed",
+    "Best SIM Cards and Mobile Plans in Germany for Expats 2026",
+    "Telekom vs Vodafone vs O2: Which Mobile Network in Germany?",
+    # UTILITIES
+    "Cheapest Electricity Providers in Germany 2026: Switch and Save",
+    "Verivox vs Check24: Which Comparison Portal Is Better in Germany?",
+    # TRAVEL & TRANSPORT
+    "Best Travel Deals and Booking Sites in Germany 2026",
+    "Cheapest Car Rental in Germany: Complete Comparison Guide",
+    # MONEY TRANSFER
+    "Best Money Transfer Services from Germany 2026: Wise vs ACE vs TapTap",
+    "TapTap Send Review 2026: Send Money Home from Germany Cheaply",
+    "ACE Money Transfer Review: Sending Money from Germany",
+    # INVESTMENT
+    "Trade Republic vs Scalable Capital: Best Broker for Expats in Germany",
+    "Best ETF Brokers in Germany for Beginners 2026",
+    # CASHBACK
+    "Best Cashback Apps and Websites in Germany 2026",
+    "Shoop vs iGraal: Best Cashback Portal in Germany",
+    # TAX
+    "SteuerGo vs WISO: Best Tax Software for Expats in Germany",
+    "How to Get a Tax Refund in Germany: Complete Guide 2026",
+]
+
+# ============================================================
+#  🌱  GENERAL SEED TOPIC POOL
 # ============================================================
 SEED_TOPICS = [
     # BANKING & FINANCE
-    "How to open a bank account in Germany as a foreigner in 2025",
-    "Best free bank accounts in Germany for expats: N26 vs C24 vs Commerzbank",
-    "How to get a credit card in Germany with no credit history",
+    "How to open a bank account in Germany as a foreigner",
     "How to invest in ETFs and stocks in Germany as an expat",
-    "Trade Republic vs DKB vs Scalable Capital: best broker for expats in Germany",
     "How to build a credit score (Schufa) in Germany from scratch",
     "Sending money home from Germany: cheapest international transfer services",
     "Best cashback apps and websites in Germany to save money",
@@ -55,7 +121,6 @@ SEED_TOPICS = [
     "Car insurance in Germany for foreigners: a complete guide",
     "Public vs private health insurance in Germany: which is better for expats?",
     "What is Hausratversicherung and do expats in Germany really need it?",
-    "How to get dental insurance in Germany as an expat",
     # TAX & LEGAL
     "How to file taxes in Germany as an expat (Steuererklärung guide)",
     "Tax classes in Germany explained: which Steuerklasse should you choose?",
@@ -63,12 +128,10 @@ SEED_TOPICS = [
     "How to get a tax ID (Steueridentifikationsnummer) in Germany",
     "Understanding your German payslip: Lohnabrechnung explained",
     # INTERNET & MOBILE
-    "Best prepaid SIM cards in Germany for expats in 2025",
+    "Best prepaid SIM cards in Germany for expats",
     "How to compare and switch internet providers in Germany",
-    "Cheapest mobile phone plans in Germany: complete comparison",
     "How to set up internet at home in Germany: step-by-step guide",
     # UTILITIES & LIVING
-    "Cheapest electricity providers in Germany 2025: how to switch and save",
     "How to switch gas providers in Germany and save money",
     "How to register your address in Germany (Anmeldung): step-by-step guide",
     "How to find an apartment in Germany as a foreigner",
@@ -82,85 +145,148 @@ SEED_TOPICS = [
 ]
 
 # ============================================================
-#  🔧  HELPERS
+#  🔧  AUTH & HTTP
 # ============================================================
 
-def build_auth_headers():
-    credentials = f"{WP_USER}:{WP_APP_PASS}"
-    token = base64.b64encode(credentials.encode()).decode("utf-8")
+def build_headers():
+    token = base64.b64encode(f"{WP_USER}:{WP_APP_PASS}".encode()).decode()
     return {"Authorization": f"Basic {token}", "Content-Type": "application/json"}
 
-HEADERS = build_auth_headers()
+HEADERS = build_headers()
 
 
 def wp_request(method, endpoint, **kwargs):
     url = f"{WP_URL}/wp-json/wp/v2/{endpoint}"
-    r   = requests.request(method, url, headers=HEADERS, **kwargs)
+    r   = requests.request(method, url, headers=HEADERS, timeout=30, **kwargs)
     if not r.ok:
-        raise Exception(f"WP API error {r.status_code}: {r.text[:400]}")
+        raise Exception(f"WP {r.status_code}: {r.text[:300]}")
     return r.json()
 
 
-def fetch_all_post_titles():
-    titles, page = [], 1
+# ============================================================
+#  🔍  DUPLICATE DETECTION
+# ============================================================
+
+def fetch_all_post_data():
+    """Fetch all posts returning list of {id, title, slug, link}."""
+    posts, page = [], 1
     while True:
         r = requests.get(
             f"{WP_URL}/wp-json/wp/v2/posts", headers=HEADERS,
             params={"per_page": 100, "page": page, "status": "publish",
-                    "_fields": "title,slug"})
-        if r.status_code == 400: break
+                    "_fields": "id,title,slug,link"}, timeout=30)
+        if r.status_code == 400:
+            break
         r.raise_for_status()
         batch = r.json()
-        if not batch: break
-        for post in batch:
-            titles.append(post["title"]["rendered"].lower())
-        if page >= int(r.headers.get("X-WP-TotalPages", 1)): break
+        if not batch:
+            break
+        posts.extend(batch)
+        if page >= int(r.headers.get("X-WP-TotalPages", 1)):
+            break
         page += 1
-    return titles
+    return posts
 
 
-def fetch_wp_categories():
-    cat_map, page = {}, 1
-    while True:
-        r = requests.get(
-            f"{WP_URL}/wp-json/wp/v2/categories", headers=HEADERS,
-            params={"per_page": 100, "page": page, "_fields": "id,name"})
-        if r.status_code == 400: break
-        r.raise_for_status()
-        for cat in r.json():
-            cat_map[cat["name"].lower()] = cat["id"]
-        if page >= int(r.headers.get("X-WP-TotalPages", 1)): break
-        page += 1
-    return cat_map
-
-
-def similarity(a, b):
+def title_similarity(a, b):
     return SequenceMatcher(None, a.lower(), b.lower()).ratio()
 
 
-def topic_already_covered(topic, existing_titles, threshold=0.55):
-    topic_words = set(re.findall(r"\b\w{4,}\b", topic.lower()))
-    for title in existing_titles:
-        if similarity(topic, title) >= threshold:
-            return True, title
-        title_words = set(re.findall(r"\b\w{4,}\b", title))
-        if topic_words and title_words:
-            if len(topic_words & title_words) / len(topic_words) >= 0.60:
-                return True, title
+def keyword_overlap(a, b, min_word_len=4):
+    words_a = set(re.findall(rf'\b\w{{{min_word_len},}}\b', a.lower()))
+    words_b = set(re.findall(rf'\b\w{{{min_word_len},}}\b', b.lower()))
+    if not words_a:
+        return 0.0
+    return len(words_a & words_b) / len(words_a)
+
+
+def find_duplicate(topic, all_posts, sim_threshold=0.55, kw_threshold=0.60):
+    """
+    Check if a similar article already exists.
+    Returns (True, existing_post) or (False, None).
+    Checks:
+      1. Title similarity (fuzzy string match)
+      2. Keyword overlap (shared significant words)
+      3. Slug match (exact slug already exists)
+    """
+    candidate_slug = re.sub(r'[^a-z0-9]+', '-',
+                            topic.lower())[:80].strip('-')
+
+    for post in all_posts:
+        existing_title = post["title"]["rendered"]
+        existing_slug  = post.get("slug", "")
+
+        # Slug match
+        if candidate_slug and existing_slug and \
+           SequenceMatcher(None, candidate_slug, existing_slug).ratio() > 0.85:
+            return True, post
+
+        # Title similarity
+        if title_similarity(topic, existing_title) >= sim_threshold:
+            return True, post
+
+        # Keyword overlap
+        if keyword_overlap(topic, existing_title) >= kw_threshold:
+            return True, post
+
     return False, None
 
 
-def pick_from_pool(pool, existing_titles):
-    shuffled = pool.copy()
-    random.shuffle(shuffled)
-    skipped = []
-    for topic in shuffled:
-        covered, matched = topic_already_covered(topic, existing_titles)
-        if covered:
-            skipped.append((topic, matched))
-        else:
-            return topic, skipped
-    return None, skipped
+# ============================================================
+#  🎯  TOPIC SELECTION
+# ============================================================
+
+def pick_fresh_topic(all_posts, custom_topic=None):
+    """
+    Pick a fresh topic.
+    Order: custom → high-conversion → general seeds → AI-generated.
+    Returns (topic, source).
+    """
+    existing_titles = [p["title"]["rendered"] for p in all_posts]
+
+    # Custom topic from CLI
+    if custom_topic:
+        is_dup, match = find_duplicate(custom_topic, all_posts)
+        if is_dup:
+            log.warning(f"Custom topic is similar to existing: '{match['title']['rendered']}'")
+            log.warning("Publishing anyway (custom override).")
+        return custom_topic, "custom"
+
+    # Try high-conversion pool first
+    log.info("Checking high-conversion money pages...")
+    shuffled_hc = HIGH_CONVERSION_TOPICS.copy()
+    random.shuffle(shuffled_hc)
+    for topic in shuffled_hc:
+        is_dup, _ = find_duplicate(topic, all_posts)
+        if not is_dup:
+            log.info(f"Found fresh high-conversion topic.")
+            return topic, "high-conversion"
+
+    # Try general seeds
+    log.info("High-conversion pool exhausted. Trying general seeds...")
+    shuffled_seed = SEED_TOPICS.copy()
+    random.shuffle(shuffled_seed)
+    for topic in shuffled_seed:
+        is_dup, _ = find_duplicate(topic, all_posts)
+        if not is_dup:
+            log.info(f"Found fresh seed topic.")
+            return topic, "seed"
+
+    # AI generation
+    log.info("All seeds covered. Generating AI topics...")
+    for attempt in range(1, 6):
+        log.info(f"AI topic generation attempt {attempt}/5...")
+        new_topics = generate_new_topics(existing_titles, count=20)
+        random.shuffle(new_topics)
+        for topic in new_topics:
+            is_dup, _ = find_duplicate(topic, all_posts)
+            if not is_dup:
+                log.info(f"Found fresh AI topic on attempt {attempt}.")
+                return topic, "ai-generated"
+        log.warning("All generated topics overlapped. Retrying...")
+
+    log.error("No fresh topics found after all attempts.")
+    sys.exit(1)
 
 
 def generate_new_topics(existing_titles, count=20):
@@ -168,186 +294,200 @@ def generate_new_topics(existing_titles, count=20):
     sample = existing_titles[:80]
     existing_str = "\n".join(f"- {t}" for t in sample)
     prompt = f"""
-You are an SEO strategist for a website helping expats in Germany (germanysupport.de).
-Generate exactly {count} NEW article topic ideas for expats in Germany.
+You are an SEO strategist for germanysupport.de — a guide for expats in Germany.
+Generate exactly {count} NEW article topic ideas.
+Topics must be high-demand, low-competition, practical for expats.
 NOT similar to already published articles below.
-Cover: banking, insurance, taxes, housing, mobile/internet, utilities,
-healthcare, bureaucracy, transport, work, daily life, culture shock,
-language tips, childcare, schools, social benefits, retirement, side hustles,
-freelancing, online shopping, public transport, German food, expat communities.
+Focus on: banking, insurance, taxes, housing, mobile/internet, utilities,
+healthcare, bureaucracy, transport, work, investments, cashback, deals.
+Prioritize "comparison" and "best X" topics — they get high affiliate clicks.
 
 Already published:
 {existing_str}
 
-Output ONLY a valid JSON array of {count} strings. No markdown.
+Output ONLY a JSON array of {count} strings. No markdown.
 """
-    print("  Asking Claude for new topics...")
-    response = client.messages.create(
+    r = client.messages.create(
         model="claude-sonnet-4-20250514", max_tokens=1500,
         messages=[{"role": "user", "content": prompt}])
-    raw = response.content[0].text.strip()
+    raw = r.content[0].text.strip()
     raw = re.sub(r"^```json\s*", "", raw)
-    raw = re.sub(r"```$", "", raw).strip()
-    topics = json.loads(raw)
-    print(f"  Generated {len(topics)} new topic ideas.")
-    return topics
+    raw = re.sub(r"```$",        "", raw).strip()
+    return json.loads(raw)
 
 
-def pick_fresh_topic(existing_titles):
-    print("  Checking seed pool...")
-    topic, skipped = pick_from_pool(SEED_TOPICS, existing_titles)
-    if topic:
-        print(f"  Found fresh seed topic ({len(skipped)} seeds covered).")
-        return topic, "seed"
+# ============================================================
+#  ✍️  ARTICLE GENERATION
+# ============================================================
 
-    print(f"  All {len(SEED_TOPICS)} seeds covered. Generating AI topics...")
-    for attempt in range(1, 6):
-        print(f"  AI attempt {attempt}/5...")
-        new_topics = generate_new_topics(existing_titles, count=20)
-        topic, _   = pick_from_pool(new_topics, existing_titles)
-        if topic:
-            print(f"  Found fresh AI topic on attempt {attempt}.")
-            return topic, "ai-generated"
-        print("  All generated topics overlapped. Retrying...")
-
-    print("ERROR: No fresh topics found.")
-    sys.exit(1)
-
-
-def generate_article(topic):
-    client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-
-    # Get relevant links for this topic
-    rel_links = get_relevant_links(topic, "")
-    links_str = format_links_for_prompt(rel_links)
+def generate_article(topic, relevant_links):
+    client    = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+    links_str = format_links_for_prompt(relevant_links)
     cats_str  = "\n".join(f"- {c}" for c in ALLOWED_CATEGORIES)
 
     system_prompt = f"""
-You are an expert SEO content writer for an expat guide website about Germany.
+You are an expert SEO content writer for germanysupport.de — an expat guide for Germany.
 Year: {CURRENT_YEAR}.
 
-Your articles are:
-- Comprehensive (1200-1800 words)
-- Written in clear, friendly English
-- Structured with H2 and H3 headings, short paragraphs
-- Packed with actionable, practical advice
-- Naturally optimised for long-tail keywords
-- Including a meta description (max 155 chars) and 10-15 SEO tags
-- Including an image search keyword for the featured image
-- Containing naturally placed referral links
+ARTICLE STRUCTURE (high-conversion format):
+1. Introduction (focus keyword in first sentence, explain what reader will learn)
+2. Quick Summary Box (HTML table: key facts at a glance)
+3. H2 sections with practical, detailed content
+4. Comparison Table (HTML <table>) if the topic involves comparing options
+5. Step-by-step instructions where relevant
+6. Pros/Cons or Comparison sections
+7. Strong CTA (call-to-action) sections near affiliate links
+8. FAQ section (5-6 questions, Rank Math schema format)
+9. Conclusion with summary and recommended action
 
-SPECIAL RULE for TapTap Send:
-Always mention promo code IQBAL12 and the €10-€15 bonus for sending €50+.
-Example: "{TAPTAP_PROMO_TEXT}"
+RANK MATH SEO:
+- Focus keyword in the very first sentence
+- Focus keyword in title (near start), meta description (first 10 words)
+- Focus keyword in at least 2 H2 headings
+- ~1% keyword density
+- Short paragraphs (2-4 sentences max)
+- Slug under 60 chars
 
-CATEGORY RULES — pick 1-2, EXACT names only:
+AFFILIATE LINKS:
+- Embed naturally with strong CTAs like "Open a free account", "Compare rates now"
+- Use: <a href="URL" target="_blank" rel="nofollow sponsored">CTA text</a>
+- TapTap Send: ALWAYS mention promo code {TAPTAP_PROMO_TEXT}
+
+CATEGORIES — 1-2, exact names:
 {cats_str}
 
-Output ONLY valid JSON, no markdown fences:
+Output ONLY valid JSON, no markdown:
 {{
-  "title": "Article title {CURRENT_YEAR}",
-  "slug": "url-friendly-slug",
-  "meta_description": "155-char meta description",
-  "focus_keyword": "main SEO keyword",
-  "tags": ["tag1", "tag2"],
-  "categories": ["Exact Category Name"],
-  "image_search_query": "pexels search term (2-4 words)",
-  "content": "Full HTML body using <h2>, <h3>, <p>, <ul>, <li>, <a> tags"
+  "title": "Keyword-rich Title {CURRENT_YEAR}",
+  "slug": "keyword-slug-max-60",
+  "meta_description": "Focus keyword first. Exactly 150-155 chars.",
+  "focus_keyword": "exact keyword phrase",
+  "tags": ["tag1","tag2","tag3","tag4","tag5"],
+  "categories": ["Category Name"],
+  "image_search_query": "2-4 word Pexels search",
+  "content": "Full HTML — comparison tables, CTAs, FAQ schema, all affiliate links"
 }}
 """
 
     user_prompt = f"""
-Write a comprehensive SEO-optimised article for expats in Germany:
+Write a high-conversion SEO article for expats in Germany.
 TOPIC: {topic}
 YEAR: {CURRENT_YEAR}
 
-Available referral links — embed naturally where relevant:
+Affiliate links (embed with strong CTAs):
 {links_str}
 
-Output ONLY the raw JSON object.
+Include comparison tables and/or step-by-step sections where relevant.
+Output ONLY the raw JSON.
 """
 
-    response = client.messages.create(
+    r = client.messages.create(
         model="claude-sonnet-4-20250514", max_tokens=4096,
         system=system_prompt,
         messages=[{"role": "user", "content": user_prompt}])
 
-    raw = response.content[0].text.strip()
+    raw = r.content[0].text.strip()
     raw = re.sub(r"^```json\s*", "", raw)
-    raw = re.sub(r"```$", "", raw).strip()
+    raw = re.sub(r"```$",        "", raw).strip()
     return json.loads(raw)
 
 
+# ============================================================
+#  🖼️  PEXELS IMAGE
+# ============================================================
+
 def fetch_pexels_image(query):
-    headers = {"Authorization": PEXELS_KEY}
-    params  = {"query": query, "per_page": 5, "orientation": "landscape"}
-    r = requests.get("https://api.pexels.com/v1/search", headers=headers, params=params)
+    hdrs   = {"Authorization": PEXELS_KEY}
+    params = {"query": query, "per_page": 5, "orientation": "landscape"}
+    r = requests.get("https://api.pexels.com/v1/search",
+                     headers=hdrs, params=params, timeout=20)
     r.raise_for_status()
     data = r.json()
     if not data.get("photos"):
         fallback = query.split()[0]
-        print(f"  No Pexels results for '{query}', retrying with '{fallback}'...")
+        log.warning(f"No Pexels results for '{query}', retrying '{fallback}'")
         params["query"] = fallback
-        r = requests.get("https://api.pexels.com/v1/search", headers=headers, params=params)
+        r = requests.get("https://api.pexels.com/v1/search",
+                         headers=hdrs, params=params, timeout=20)
         data = r.json()
     if not data.get("photos"):
-        raise ValueError(f"No Pexels images found for: {query}")
+        raise ValueError(f"No Pexels images for: {query}")
     photo = data["photos"][0]
-    return requests.get(photo["src"]["large2x"]).content, photo["photographer"], photo["src"]["large2x"]
+    return (requests.get(photo["src"]["large2x"], timeout=30).content,
+            photo["photographer"], photo["src"]["large2x"])
 
 
 def upload_image(img_bytes, slug, title, photographer):
-    safe_slug   = re.sub(r"[^a-z0-9-]", "-", slug)[:60]
-    media_hdrs  = dict(HEADERS)
-    media_hdrs["Content-Type"]        = "image/jpeg"
-    media_hdrs["Content-Disposition"] = f'attachment; filename="{safe_slug}.jpg"'
-    r = requests.post(f"{WP_URL}/wp-json/wp/v2/media", headers=media_hdrs, data=img_bytes)
+    safe  = re.sub(r"[^a-z0-9-]", "-", slug)[:60]
+    hdrs  = dict(HEADERS)
+    hdrs["Content-Type"]        = "image/jpeg"
+    hdrs["Content-Disposition"] = f'attachment; filename="{safe}.jpg"'
+    r = requests.post(f"{WP_URL}/wp-json/wp/v2/media",
+                      headers=hdrs, data=img_bytes, timeout=60)
     if not r.ok:
-        raise Exception(f"Media upload failed {r.status_code}: {r.text[:300]}")
-    media_id = r.json()["id"]
-    requests.post(f"{WP_URL}/wp-json/wp/v2/media/{media_id}", headers=HEADERS,
-                  json={"alt_text": title, "caption": f"Photo by {photographer} on Pexels"})
-    return media_id
+        raise Exception(f"Image upload failed {r.status_code}: {r.text[:200]}")
+    mid = r.json()["id"]
+    requests.post(f"{WP_URL}/wp-json/wp/v2/media/{mid}", headers=HEADERS,
+                  json={"alt_text": title,
+                        "caption": f"Photo by {photographer} on Pexels"}, timeout=15)
+    return mid
 
 
-def resolve_category_ids(chosen_categories, wp_cat_map):
+# ============================================================
+#  📂  CATEGORIES & TAGS
+# ============================================================
+
+def fetch_wp_categories():
+    cat_map, page = {}, 1
+    while True:
+        r = requests.get(f"{WP_URL}/wp-json/wp/v2/categories", headers=HEADERS,
+                         params={"per_page": 100, "page": page, "_fields": "id,name"},
+                         timeout=20)
+        if r.status_code == 400: break
+        r.raise_for_status()
+        for c in r.json(): cat_map[c["name"].lower()] = c["id"]
+        if page >= int(r.headers.get("X-WP-TotalPages", 1)): break
+        page += 1
+    return cat_map
+
+
+def resolve_cats(chosen, cat_map):
     ids = []
-    for name in chosen_categories:
+    for name in chosen:
         nl = name.lower()
-        if nl in wp_cat_map:
-            ids.append(wp_cat_map[nl]); continue
-        best_score, best_key = 0, None
-        for k in wp_cat_map:
+        if nl in cat_map:
+            ids.append(cat_map[nl]); continue
+        best_s, best_k = 0, None
+        for k in cat_map:
             s = SequenceMatcher(None, nl, k).ratio()
-            if s > best_score: best_score, best_key = s, k
-        if best_key and best_score >= 0.60:
-            ids.append(wp_cat_map[best_key])
-            print(f"      Category fuzzy: '{name}' → '{best_key}'")
-        else:
-            print(f"      WARNING: no match for '{name}'")
-    if not ids:
-        fb = "living in germany"
-        if fb in wp_cat_map: ids.append(wp_cat_map[fb])
+            if s > best_s: best_s, best_k = s, k
+        if best_k and best_s >= 0.60: ids.append(cat_map[best_k])
+    if not ids and "living in germany" in cat_map:
+        ids.append(cat_map["living in germany"])
     return ids
 
 
-def sync_tags(tag_names):
-    tag_ids = []
-    for name in tag_names:
+def sync_tags(names):
+    ids = []
+    for name in names:
         try:
-            t = wp_request("POST", "tags", json={"name": name})
-            tag_ids.append(t["id"])
+            ids.append(wp_request("POST", "tags", json={"name": name})["id"])
         except Exception:
-            search = requests.get(f"{WP_URL}/wp-json/wp/v2/tags", headers=HEADERS,
-                                  params={"search": name, "per_page": 1}).json()
-            if search: tag_ids.append(search[0]["id"])
-    return tag_ids
+            s = requests.get(f"{WP_URL}/wp-json/wp/v2/tags", headers=HEADERS,
+                             params={"search": name, "per_page": 1}, timeout=15).json()
+            if s: ids.append(s[0]["id"])
+    return ids
 
+
+# ============================================================
+#  🚀  PUBLISH
+# ============================================================
 
 def publish_post(article, featured_id, cat_ids, tag_ids, photographer):
     footer = (
         f'<hr/><p><em>Featured image by <strong>{photographer}</strong> via '
-        f'<a href="https://www.pexels.com" target="_blank" rel="nofollow">Pexels</a>.</em></p>'
+        f'<a href="https://www.pexels.com" target="_blank" rel="nofollow">Pexels</a>.'
+        f'</em></p>'
     )
     return wp_request("POST", "posts", json={
         "title":          article["title"],
@@ -358,11 +498,11 @@ def publish_post(article, featured_id, cat_ids, tag_ids, photographer):
         "tags":           tag_ids,
         "categories":     cat_ids,
         "excerpt":        article["meta_description"],
+        "lang":           "en",
         "meta": {
             "rank_math_focus_keyword": article["focus_keyword"],
             "rank_math_description":   article["meta_description"],
-            "_yoast_wpseo_focuskw":    article["focus_keyword"],
-            "_yoast_wpseo_metadesc":   article["meta_description"],
+            "rank_math_title":         article["title"],
         },
     })
 
@@ -372,54 +512,57 @@ def publish_post(article, featured_id, cat_ids, tag_ids, photographer):
 # ============================================================
 
 def main():
-    print("=" * 62)
-    print(f"  GermanySupport.de — AutoBlogger ({CURRENT_YEAR})")
-    print("=" * 62)
+    parser = argparse.ArgumentParser(description="GermanySupport AutoBlogger")
+    parser.add_argument("--topic", type=str, default=None,
+                        help="Override topic (skip pool selection)")
+    args = parser.parse_args()
 
-    print("\n[1/7] Fetching existing posts...")
-    existing_titles = fetch_all_post_titles()
-    print(f"      Found {len(existing_titles)} published posts.")
+    log.info("=" * 60)
+    log.info(f"GermanySupport AutoBlogger — {CURRENT_YEAR}")
+    log.info("=" * 60)
 
-    print("\n[2/7] Fetching WordPress categories...")
-    wp_cat_map = fetch_wp_categories()
-    print(f"      Found {len(wp_cat_map)} categories.")
+    # Warm up referral links cache
+    log.info("[1/7] Fetching referral links from WordPress...")
+    fetch_referral_links(WP_URL)
+    log.info("[2/7] Fetching WordPress categories...")
+    cat_map = fetch_wp_categories()
 
-    print("\n[3/7] Picking an uncovered topic...")
-    chosen_topic, source = pick_fresh_topic(existing_titles)
-    print(f"      Source : {source}")
-    print(f"      Topic  : {chosen_topic}")
+    log.info("[3/7] Fetching existing posts for duplicate check...")
+    all_posts = fetch_all_post_data()
+    log.info(f"      Found {len(all_posts)} existing posts.")
 
-    print("\n[4/7] Generating article with Claude...")
-    article = generate_article(chosen_topic)
-    print(f"      Title    : {article['title']}")
-    print(f"      Slug     : {article['slug']}")
-    print(f"      Focus KW : {article['focus_keyword']}")
-    print(f"      Tags     : {', '.join(article['tags'][:5])} ...")
-    print(f"      Words    : ~{len(article['content'].split())}")
+    log.info("[4/7] Selecting topic...")
+    chosen_topic, source = pick_fresh_topic(all_posts, args.topic)
+    log.info(f"      Source : {source}")
+    log.info(f"      Topic  : {chosen_topic}")
 
-    print(f"\n[5/7] Fetching image: '{article['image_search_query']}'...")
+    log.info("[5/7] Generating article with Claude...")
+    rel_links = get_relevant_links(chosen_topic, "", WP_URL)
+    log.info(f"      Using {len(rel_links)} relevant affiliate links.")
+    article   = generate_article(chosen_topic, rel_links)
+    log.info(f"      Title    : {article['title']}")
+    log.info(f"      Focus KW : {article['focus_keyword']}")
+    log.info(f"      Words    : ~{len(article['content'].split())}")
+
+    log.info(f"[6/7] Fetching Pexels image: '{article['image_search_query']}'...")
     img_bytes, photographer, img_url = fetch_pexels_image(article["image_search_query"])
-    print(f"      Photographer: {photographer}")
-
-    print("\n[6/7] Uploading featured image...")
     featured_id = upload_image(img_bytes, article["slug"], article["title"], photographer)
-    print(f"      Media ID: {featured_id}")
+    log.info(f"      Photographer : {photographer}")
+    log.info(f"      Media ID     : {featured_id}")
 
-    print("\n[7/7] Publishing post...")
+    log.info("[7/7] Publishing post to WordPress...")
     tag_ids = sync_tags(article["tags"])
-    cat_ids = resolve_category_ids(article.get("categories", ["Living in Germany"]), wp_cat_map)
+    cat_ids = resolve_cats(article.get("categories", ["Living in Germany"]), cat_map)
     post    = publish_post(article, featured_id, cat_ids, tag_ids, photographer)
 
-    print()
-    print("=" * 62)
-    print("  ARTICLE PUBLISHED!")
-    print("=" * 62)
-    print(f"  Title       : {post['title']['rendered']}")
-    print(f"  URL         : {post['link']}")
-    print(f"  Post ID     : {post['id']}")
-    print(f"  Topic source: {source}")
-    print(f"  Image       : {img_url}")
-    print("=" * 62)
+    log.info("=" * 60)
+    log.info("PUBLISHED SUCCESSFULLY")
+    log.info("=" * 60)
+    log.info(f"  Title  : {post['title']['rendered']}")
+    log.info(f"  URL    : {post['link']}")
+    log.info(f"  ID     : {post['id']}")
+    log.info(f"  Source : {source}")
+    log.info("=" * 60)
 
 
 if __name__ == "__main__":

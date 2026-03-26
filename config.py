@@ -1,24 +1,158 @@
 """
 GermanySupport.de — Shared Configuration
 ==========================================
-Single source of truth for categories and referral links.
-All scripts (publish_article.py, optimize_articles.py,
-translate_articles.py) import from here.
+Single source of truth for:
+  - Categories
+  - Referral links (fetched dynamically from WordPress)
+  - TapTap promo code logic
+  - Link relevance mapping
 
-To update referral links or categories: edit ONLY this file.
-All scripts pick up changes automatically on next run.
+HOW REFERRAL LINKS WORK:
+  1. At runtime, fetch_referral_links() calls /wp-json/gs/v1/referral-links
+     which reads all active /go/* redirects from the Redirection plugin.
+  2. The result is merged with STATIC_FALLBACK_LINKS so the script
+     still works even if the API is down.
+  3. Removed/non-affiliated products are excluded via EXCLUDED_PRODUCTS.
+
+TO ADD/CHANGE A LINK:
+  → Edit it in WordPress Redirection plugin. No code changes needed.
+
+TO REMOVE A PRODUCT PERMANENTLY:
+  → Add its slug to EXCLUDED_PRODUCTS below.
 """
 
+import os
+import json
+import time
+import logging
 from datetime import datetime
+from difflib import SequenceMatcher
+
+import requests as _requests
+
+logger = logging.getLogger(__name__)
 
 # ============================================================
-#  📅  CURRENT YEAR — auto-detected, never hardcode
+#  📅  CURRENT YEAR — auto-detected
 # ============================================================
 CURRENT_YEAR = datetime.now().year
 
 # ============================================================
+#  🚫  EXCLUDED PRODUCTS
+#  These slugs are NEVER used, even if present in WordPress.
+#  Products we have no affiliation with.
+# ============================================================
+EXCLUDED_SLUGS = {
+    "commerzbank",
+    "amex",
+    "metro",
+    "getsafe",
+    "congstar",
+}
+
+# ============================================================
+#  🔒  STATIC FALLBACK LINKS
+#  Used when the WordPress API is unreachable.
+#  Keep in sync manually as a backup only.
+# ============================================================
+STATIC_FALLBACK_LINKS = {
+    # COMPARISON PORTALS
+    "go/tarifcheck":          "https://germanysupport.de/go/tarifcheck",
+    "go/check24":             "https://germanysupport.de/go/check24",
+    "go/verivox":             "https://germanysupport.de/go/verivox",
+    # BANKING
+    "go/n26":                 "https://germanysupport.de/go/n26",
+    "go/c24":                 "https://germanysupport.de/go/c24",
+    "go/advanzia":            "https://germanysupport.de/go/advanzia",
+    "go/credit-cards":        "https://germanysupport.de/go/credit-cards",
+    "go/trade-republic":      "https://germanysupport.de/go/trade-republic",
+    "go/scalable-capital":    "https://germanysupport.de/go/scalable-capital",
+    "go/paypal":              "https://germanysupport.de/go/paypal",
+    # INSURANCE
+    "go/haftpflicht":         "https://germanysupport.de/go/haftpflicht",
+    "go/huk24":               "https://germanysupport.de/go/huk24",
+    "go/car-insurance":       "https://germanysupport.de/go/car-insurance",
+    "go/legal-insurance":     "https://germanysupport.de/go/legal-insurance",
+    # TAX
+    "go/steuergo":            "https://germanysupport.de/go/steuergo",
+    "go/wiso":                "https://germanysupport.de/go/wiso",
+    # INTERNET & MOBILE
+    "go/verivox-dsl":         "https://germanysupport.de/go/verivox-dsl",
+    "go/dsl-check24":         "https://germanysupport.de/go/dsl-check24",
+    "go/klarmobil":           "https://germanysupport.de/go/klarmobil",
+    "go/check24-mobile":      "https://germanysupport.de/go/check24-mobile",
+    "go/vodafone":            "https://germanysupport.de/go/vodafone",
+    "go/telekom":             "https://germanysupport.de/go/telekom",
+    "go/telekom-fiber":       "https://germanysupport.de/go/telekom-fiber",
+    # UTILITIES
+    "go/electricity":         "https://germanysupport.de/go/electricity",
+    "go/gas":                 "https://germanysupport.de/go/gas",
+    # TRAVEL
+    "go/travel":              "https://germanysupport.de/go/travel",
+    "go/car-rental":          "https://germanysupport.de/go/car-rental",
+    "go/vacation":            "https://germanysupport.de/go/vacation",
+    # MONEY TRANSFER
+    "go/ace":                 "https://germanysupport.de/go/ace",
+    "go/taptap":              "https://germanysupport.de/go/taptap",
+    # CASHBACK
+    "go/shoop":               "https://germanysupport.de/go/shoop",
+    "go/igraal":              "https://germanysupport.de/go/igraal",
+    "go/payback":             "https://germanysupport.de/go/payback",
+}
+
+# Human-readable display names for slugs
+SLUG_DISPLAY_NAMES = {
+    "go/tarifcheck":       "Tarifcheck",
+    "go/check24":          "Check24",
+    "go/verivox":          "Verivox",
+    "go/n26":              "N26 Bank",
+    "go/c24":              "C24 Bank",
+    "go/advanzia":         "Advanzia Mastercard",
+    "go/credit-cards":     "Credit Card Comparison",
+    "go/trade-republic":   "Trade Republic",
+    "go/scalable-capital": "Scalable Capital",
+    "go/paypal":           "PayPal",
+    "go/haftpflicht":      "Liability Insurance",
+    "go/huk24":            "HUK24 Car Insurance",
+    "go/car-insurance":    "Car Insurance Compare",
+    "go/legal-insurance":  "Legal Insurance",
+    "go/steuergo":         "SteuerGo",
+    "go/wiso":             "WISO Steuer",
+    "go/verivox-dsl":      "Verivox DSL",
+    "go/dsl-check24":      "DSL Check24",
+    "go/klarmobil":        "Klarmobil",
+    "go/check24-mobile":   "Check24 Mobile",
+    "go/vodafone":         "Vodafone",
+    "go/telekom":          "Telekom",
+    "go/telekom-fiber":    "Telekom Fiber",
+    "go/electricity":      "Electricity Provider",
+    "go/gas":              "Gas Provider",
+    "go/travel":           "Check24 Travel",
+    "go/car-rental":       "Check24 Car Rental",
+    "go/vacation":         "Check24 Vacation",
+    "go/ace":              "ACE Money Transfer",
+    "go/taptap":           "TapTap Send",
+    "go/shoop":            "Shoop Cashback",
+    "go/igraal":           "iGraal Cashback",
+    "go/payback":          "PAYBACK",
+}
+
+# ============================================================
+#  💰  TAPTAP PROMO CODE
+# ============================================================
+TAPTAP_PROMO_CODE = "IQBAL12"
+TAPTAP_PROMO_HTML = (
+    '<a href="https://germanysupport.de/go/taptap" '
+    'target="_blank" rel="nofollow sponsored">TapTap Send</a> '
+    f'— use promo code <strong>{TAPTAP_PROMO_CODE}</strong> when sending '
+    '€50 or more to receive a <strong>€10–€15 bonus</strong> on your transfer.'
+)
+TAPTAP_PROMO_TEXT = (
+    f"TapTap Send (promo code {TAPTAP_PROMO_CODE}: get €10-€15 bonus when sending €50+)"
+)
+
+# ============================================================
 #  📂  ALLOWED CATEGORIES
-#  Keep in sync with your WordPress category list.
 # ============================================================
 ALLOWED_CATEGORIES = [
     "Best Deals",
@@ -51,7 +185,6 @@ ALLOWED_CATEGORIES = [
     "Travel and Tourism",
     "Utilities",
     "Working Freelance",
-    # Extended categories
     "Bank Accounts and Payments",
     "Mobile and Internet Plans",
     "Electricity and Gas Providers",
@@ -84,182 +217,168 @@ ALLOWED_CATEGORIES = [
 ]
 
 # ============================================================
-#  📌  REFERRAL LINKS
-#
-#  FORMAT: "Display Name": "https://germanysupport.de/go/slug"
-#
-#  REMOVED (no affiliation):
-#    - Commerzbank
-#    - American Express
-#    - Metro Business Account
-#    - Getsafe Haftpflicht
-#    - Congstar Mobile
-#
-#  SPECIAL: TapTap Send includes promo code IQBAL12
-#    → Users get €10 bonus when sending €50+
-#    → This is reflected in the display name and
-#      in the TAPTAP_PROMO dict below for use in articles
-# ============================================================
-REFERRAL_LINKS = {
-    # GENERIC COMPARISON PORTALS
-    "Tarifcheck":             "https://germanysupport.de/go/tarifcheck",
-    "Check24":                "https://germanysupport.de/go/check24",
-    "Verivox":                "https://germanysupport.de/go/verivox",
-    # BANKING
-    "N26 Bank":               "https://germanysupport.de/go/n26",
-    "C24 Bank":               "https://germanysupport.de/go/c24",
-    "Advanzia Mastercard":    "https://germanysupport.de/go/advanzia",
-    "Credit Card Comparison": "https://germanysupport.de/go/credit-cards",
-    "Trade Republic":         "https://germanysupport.de/go/trade-republic",
-    "Scalable Capital":       "https://germanysupport.de/go/scalable-capital",
-    "PayPal":                 "https://germanysupport.de/go/paypal",
-    # INSURANCE
-    "Liability Insurance":    "https://germanysupport.de/go/haftpflicht",
-    "HUK24 Car Insurance":    "https://germanysupport.de/go/huk24",
-    "Car Insurance Compare":  "https://germanysupport.de/go/car-insurance",
-    "Legal Insurance":        "https://germanysupport.de/go/legal-insurance",
-    # TAX & FINANCE
-    "SteuerGo":               "https://germanysupport.de/go/steuergo",
-    "WISO Steuer":            "https://germanysupport.de/go/wiso",
-    # INTERNET & MOBILE
-    "Verivox DSL":            "https://germanysupport.de/go/verivox-dsl",
-    "DSL Check24":            "https://germanysupport.de/go/dsl-check24",
-    "Klarmobil":              "https://germanysupport.de/go/klarmobil",
-    "Check24 Mobile":         "https://germanysupport.de/go/check24-mobile",
-    "Vodafone":               "https://germanysupport.de/go/vodafone",
-    "Telekom":                "https://germanysupport.de/go/telekom",
-    "Telekom Fiber":          "https://germanysupport.de/go/telekom-fiber",
-    # UTILITIES
-    "Electricity Provider":   "https://germanysupport.de/go/electricity",
-    "Gas Provider":           "https://germanysupport.de/go/gas",
-    # TRAVEL
-    "Check24 Travel":         "https://germanysupport.de/go/travel",
-    "Check24 Car Rental":     "https://germanysupport.de/go/car-rental",
-    "Check24 Vacation":       "https://germanysupport.de/go/vacation",
-    # MONEY TRANSFER
-    "ACE Money Transfer":     "https://germanysupport.de/go/ace",
-    # TapTap Send — promo code IQBAL12 gives €10 bonus when sending €50+
-    "TapTap Send":            "https://germanysupport.de/go/taptap",
-    # CASHBACK
-    "Shoop Cashback":         "https://germanysupport.de/go/shoop",
-    "iGraal Cashback":        "https://germanysupport.de/go/igraal",
-    "PAYBACK":                "https://germanysupport.de/go/payback",
-}
-
-# ============================================================
-#  💰  TAPTAP SEND PROMO — special handling
-#  When embedding TapTap Send links, use this HTML snippet
-#  to clearly show the promo code and bonus offer.
-# ============================================================
-TAPTAP_PROMO_HTML = (
-    '<a href="https://germanysupport.de/go/taptap" '
-    'target="_blank" rel="nofollow sponsored">'
-    'TapTap Send</a> '
-    '(use promo code <strong>IQBAL12</strong> when sending '
-    '€50 or more to get a <strong>€10–€15 bonus</strong>)'
-)
-
-TAPTAP_PROMO_TEXT = (
-    "TapTap Send — use promo code IQBAL12 when sending €50 or more "
-    "to receive a €10–€15 bonus on your transfer."
-)
-
-# ============================================================
-#  🔗  RELEVANCE MAP
-#  Which referral links are relevant for which article topics.
-#  Used by optimize_articles.py and publish_article.py to
-#  only embed links that make sense for the article content.
+#  🔗  LINK RELEVANCE MAP
+#  slug_suffix → [keywords that trigger this link]
 # ============================================================
 LINK_RELEVANCE = {
-    "N26 Bank":               ["bank", "account", "banking", "girokonto", "finanz"],
-    "C24 Bank":               ["bank", "account", "banking", "girokonto", "finanz"],
-    "Advanzia Mastercard":    ["credit card", "mastercard", "kreditkarte"],
-    "Credit Card Comparison": ["credit card", "kreditkarte", "card"],
-    "Trade Republic":         ["invest", "stock", "etf", "broker", "trading", "aktien"],
-    "Scalable Capital":       ["invest", "stock", "etf", "broker", "trading"],
-    "PayPal":                 ["payment", "online shopping", "transfer", "paypal"],
-    "Liability Insurance":    ["insurance", "haftpflicht", "liability", "versicherung"],
-    "HUK24 Car Insurance":    ["car insurance", "kfz", "auto", "vehicle", "fahrzeug"],
-    "Car Insurance Compare":  ["car insurance", "kfz", "auto", "vehicle"],
-    "Legal Insurance":        ["legal", "rechtsschutz", "lawyer", "anwalt"],
-    "SteuerGo":               ["tax", "steuer", "steuererklärung", "finanzamt"],
-    "WISO Steuer":            ["tax", "steuer", "steuererklärung", "finanzamt"],
-    "Verivox DSL":            ["internet", "dsl", "broadband", "provider"],
-    "DSL Check24":            ["internet", "dsl", "broadband", "provider"],
-    "Klarmobil":              ["mobile", "sim", "phone plan", "prepaid", "handy"],
-    "Check24 Mobile":         ["mobile", "sim", "phone plan", "prepaid", "handy"],
-    "Vodafone":               ["mobile", "sim", "phone", "internet", "network"],
-    "Telekom":                ["mobile", "sim", "phone", "internet", "telekom"],
-    "Telekom Fiber":          ["fiber", "glasfaser", "internet", "broadband"],
-    "Electricity Provider":   ["electricity", "strom", "energy", "energie", "utility"],
-    "Gas Provider":           ["gas", "heating", "heizung", "energie", "utility"],
-    "Check24 Travel":         ["travel", "trip", "holiday", "flight", "reise"],
-    "Check24 Car Rental":     ["car rental", "rent a car", "mietwagen", "driving"],
-    "Check24 Vacation":       ["vacation", "holiday", "urlaub", "hotel", "travel"],
-    "ACE Money Transfer":     ["money transfer", "send money", "remittance", "overseas"],
-    "TapTap Send":            ["money transfer", "send money", "remittance", "overseas"],
-    "Shoop Cashback":         ["cashback", "saving", "discount", "deals", "shopping"],
-    "iGraal Cashback":        ["cashback", "saving", "discount", "deals", "shopping"],
-    "PAYBACK":                ["cashback", "loyalty", "points", "reward", "shopping"],
-    "Tarifcheck":             ["compare", "vergleich", "tariff", "plan", "provider"],
-    "Check24":                ["compare", "vergleich", "insurance", "internet", "energy"],
-    "Verivox":                ["compare", "vergleich", "energy", "internet", "gas"],
+    "go/n26":              ["bank", "account", "banking", "girokonto", "finanz"],
+    "go/c24":              ["bank", "account", "banking", "girokonto", "finanz"],
+    "go/advanzia":         ["credit card", "mastercard", "kreditkarte"],
+    "go/credit-cards":     ["credit card", "kreditkarte", "card comparison"],
+    "go/trade-republic":   ["invest", "stock", "etf", "broker", "trading", "aktien"],
+    "go/scalable-capital": ["invest", "stock", "etf", "broker", "trading"],
+    "go/paypal":           ["payment", "online shopping", "transfer"],
+    "go/haftpflicht":      ["insurance", "haftpflicht", "liability", "versicherung"],
+    "go/huk24":            ["car insurance", "kfz", "auto", "vehicle"],
+    "go/car-insurance":    ["car insurance", "kfz", "auto", "vehicle"],
+    "go/legal-insurance":  ["legal", "rechtsschutz", "lawyer", "anwalt"],
+    "go/steuergo":         ["tax", "steuer", "steuererklärung", "finanzamt"],
+    "go/wiso":             ["tax", "steuer", "steuererklärung", "finanzamt"],
+    "go/verivox-dsl":      ["internet", "dsl", "broadband", "provider"],
+    "go/dsl-check24":      ["internet", "dsl", "broadband", "provider"],
+    "go/klarmobil":        ["mobile", "sim", "phone plan", "prepaid", "handy"],
+    "go/check24-mobile":   ["mobile", "sim", "phone plan", "prepaid", "handy"],
+    "go/vodafone":         ["mobile", "sim", "phone", "internet", "network"],
+    "go/telekom":          ["mobile", "sim", "phone", "internet", "telekom"],
+    "go/telekom-fiber":    ["fiber", "glasfaser", "internet", "broadband"],
+    "go/electricity":      ["electricity", "strom", "energy", "energie", "utility"],
+    "go/gas":              ["gas", "heating", "heizung", "energie", "utility"],
+    "go/travel":           ["travel", "trip", "holiday", "flight", "reise"],
+    "go/car-rental":       ["car rental", "rent a car", "mietwagen", "driving"],
+    "go/vacation":         ["vacation", "holiday", "urlaub", "hotel"],
+    "go/ace":              ["money transfer", "send money", "remittance", "overseas"],
+    "go/taptap":           ["money transfer", "send money", "remittance", "overseas"],
+    "go/shoop":            ["cashback", "saving", "discount", "deals", "shopping"],
+    "go/igraal":           ["cashback", "saving", "discount", "deals", "shopping"],
+    "go/payback":          ["cashback", "loyalty", "points", "reward", "shopping"],
+    "go/tarifcheck":       ["compare", "vergleich", "tariff", "plan", "provider"],
+    "go/check24":          ["compare", "vergleich", "insurance", "internet", "energy"],
+    "go/verivox":          ["compare", "vergleich", "energy", "internet", "gas"],
 }
 
+# ============================================================
+#  🌐  DYNAMIC LINK FETCHING
+# ============================================================
 
-def get_relevant_links(title, content_text, min_links=2):
-    """
-    Return relevant affiliate links for an article based on its content.
-    Always returns at least `min_links` links even for generic topics.
-    Never includes removed/non-affiliated products.
-    Handles TapTap Send with special promo code treatment.
-    """
-    combined = (title + " " + content_text).lower()
-    relevant = {}
+# Module-level cache: {slug: full_url}
+_LINK_CACHE: dict = {}
+_CACHE_TS: float  = 0.0
+_CACHE_TTL: int   = 3600  # 1 hour
 
-    for name, keywords in LINK_RELEVANCE.items():
-        if name not in REFERRAL_LINKS:
-            continue  # skip if removed from REFERRAL_LINKS
+
+def fetch_referral_links(wp_url: str, force: bool = False) -> dict:
+    """
+    Fetch all active /go/* redirect links from WordPress.
+    Returns a dict of {slug: full_url} — e.g. {"go/n26": "https://..."}.
+
+    Caches results for 1 hour.  Falls back to STATIC_FALLBACK_LINKS
+    if the API call fails.
+
+    Excluded slugs (EXCLUDED_SLUGS) are always removed from the result.
+    """
+    global _LINK_CACHE, _CACHE_TS
+
+    now = time.time()
+    if not force and _LINK_CACHE and (now - _CACHE_TS) < _CACHE_TTL:
+        return _LINK_CACHE
+
+    api_url = f"{wp_url.rstrip('/')}/wp-json/gs/v1/referral-links"
+    try:
+        r = _requests.get(api_url, timeout=15)
+        r.raise_for_status()
+        data  = r.json()
+        links = data.get("links", {})
+        # Normalise: ensure full URLs
+        normalised = {}
+        for slug, target in links.items():
+            slug = slug.strip("/")
+            if not slug.startswith("go/"):
+                slug = f"go/{slug.split('go/')[-1]}" if "go/" in slug else slug
+            # Skip excluded
+            short = slug.replace("go/", "")
+            if short in EXCLUDED_SLUGS:
+                continue
+            # Ensure absolute URL
+            if target.startswith("/"):
+                target = wp_url.rstrip("/") + target
+            normalised[slug] = target
+
+        if normalised:
+            _LINK_CACHE = normalised
+            _CACHE_TS   = now
+            logger.info(f"Fetched {len(normalised)} referral links from WordPress API.")
+            return normalised
+
+    except Exception as e:
+        logger.warning(f"Could not fetch referral links from API: {e}")
+
+    # Fallback
+    logger.warning("Using static fallback referral links.")
+    fallback = {
+        k: v for k, v in STATIC_FALLBACK_LINKS.items()
+        if k.replace("go/", "") not in EXCLUDED_SLUGS
+    }
+    _LINK_CACHE = fallback
+    _CACHE_TS   = now
+    return fallback
+
+
+def get_relevant_links(title: str, content_text: str,
+                       wp_url: str = "", min_links: int = 2) -> dict:
+    """
+    Return relevant affiliate links for an article.
+    Fetches links dynamically if wp_url is provided; uses cache otherwise.
+    Returns {display_name: full_url}.
+    """
+    all_links = fetch_referral_links(wp_url) if wp_url else _LINK_CACHE or STATIC_FALLBACK_LINKS
+    combined  = (title + " " + content_text).lower()
+    relevant  = {}
+
+    for slug, keywords in LINK_RELEVANCE.items():
+        if slug not in all_links:
+            continue
         if any(kw in combined for kw in keywords):
-            relevant[name] = REFERRAL_LINKS[name]
+            name = SLUG_DISPLAY_NAMES.get(slug, slug)
+            relevant[name] = all_links[slug]
 
-    # Ensure minimum links for generic topics
+    # Ensure minimum
     if len(relevant) < min_links:
-        defaults = ["N26 Bank", "Shoop Cashback", "SteuerGo"]
-        for d in defaults:
-            if d not in relevant and d in REFERRAL_LINKS:
-                relevant[d] = REFERRAL_LINKS[d]
+        for slug in ["go/n26", "go/shoop", "go/steuergo"]:
+            if slug in all_links:
+                name = SLUG_DISPLAY_NAMES.get(slug, slug)
+                if name not in relevant:
+                    relevant[name] = all_links[slug]
 
     return relevant
 
 
-def format_links_for_prompt(relevant_links):
-    """
-    Format referral links for inclusion in Claude prompts.
-    TapTap Send gets special treatment with promo code info.
-    """
+def get_all_links_dict(wp_url: str = "") -> dict:
+    """Return all referral links as {display_name: url}."""
+    raw = fetch_referral_links(wp_url) if wp_url else _LINK_CACHE or STATIC_FALLBACK_LINKS
+    return {
+        SLUG_DISPLAY_NAMES.get(slug, slug): url
+        for slug, url in raw.items()
+        if slug.replace("go/", "") not in EXCLUDED_SLUGS
+    }
+
+
+def format_links_for_prompt(relevant_links: dict) -> str:
+    """Format as plain text list for Claude prompts."""
     lines = []
     for name, url in relevant_links.items():
         if name == "TapTap Send":
-            lines.append(
-                f'- TapTap Send (promo code IQBAL12 — €10 bonus for €50+ transfers): {url}'
-            )
+            lines.append(f"- {TAPTAP_PROMO_TEXT}: {url}")
         else:
             lines.append(f"- {name}: {url}")
     return "\n".join(lines)
 
 
-def format_links_as_html(relevant_links):
-    """
-    Format referral links as ready-to-embed HTML <a> tags for Claude.
-    TapTap Send gets the full promo code HTML.
-    """
+def format_links_as_html(relevant_links: dict) -> str:
+    """Format as ready-to-embed HTML <a> tags for Claude."""
     lines = []
     for name, url in relevant_links.items():
         if name == "TapTap Send":
-            lines.append(
-                f'- TapTap Send with promo code: {TAPTAP_PROMO_HTML}'
-            )
+            lines.append(f"- TapTap Send with promo: {TAPTAP_PROMO_HTML}")
         else:
             lines.append(
                 f'- {name}: <a href="{url}" target="_blank" '
