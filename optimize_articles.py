@@ -1,20 +1,22 @@
 """
-GermanySupport.de — SEO Optimizer v8
+GermanySupport.de — SEO Optimizer v9
 ======================================
-Key improvements over v7:
-  - CURRENT_YEAR auto-detected (always correct, no manual updates needed)
-  - Skips articles updated within the last 4 months (avoids redundant rewrites)
-  - Retry logic on connection errors (handles Hostinger temporary downtime)
-  - All other v7 features retained:
-      Guaranteed affiliate links (3-pass), two-pass rewrite,
-      Gutenberg + Elementor, Rank Math native API, no disclosure box,
-      TOC, internal links, image alt text
+Key fix: uses custom /wp-json/gs/v1/set-keyword endpoint
+(registered via Code Snippets plugin) to reliably set Rank Math
+focus keywords via update_post_meta — works on all Rank Math versions.
+
+Requires: "Rank Math Keyword API" snippet active in Code Snippets plugin.
+
+All v8 features retained plus:
+  - Reliable keyword setting via custom endpoint
+  - Better connection error handling with longer timeouts
+  - Clearer per-article progress logging
 
 Usage:
   python optimize_articles.py                  # all English articles
   python optimize_articles.py --limit 5        # first 5 (test)
   python optimize_articles.py --post-id 123    # single post
-  python optimize_articles.py --force          # ignore last-updated date, rewrite all
+  python optimize_articles.py --force          # ignore last-updated date
 """
 
 import os
@@ -43,27 +45,24 @@ ANTHROPIC_KEY = os.environ["ANTHROPIC_KEY"]
 # ============================================================
 #  ⚙️  SETTINGS
 # ============================================================
-MIN_WORD_COUNT    = 1200
-DELAY_BETWEEN     = 12
-MAX_SLUG_LENGTH   = 60
-SKIP_IF_NEWER_THAN_MONTHS = 4   # skip articles updated within this many months
-
-# Auto-detect current year — always correct, no manual updates needed
-CURRENT_YEAR = datetime.now().year
+MIN_WORD_COUNT            = 1200
+DELAY_BETWEEN             = 12
+MAX_SLUG_LENGTH           = 60
+SKIP_IF_NEWER_THAN_MONTHS = 4
+CURRENT_YEAR              = datetime.now().year
 
 # ============================================================
-#  🔄  HTTP SESSION WITH RETRY
-#  Handles temporary Hostinger connection drops automatically
+#  🔄  HTTP SESSION WITH RETRY & LONGER TIMEOUTS
 # ============================================================
 
 def build_session():
-    """Build a requests session with automatic retry on connection errors."""
     session = requests.Session()
     retry   = Retry(
-        total=4,
-        backoff_factor=15,       # waits 15s, 30s, 60s between retries
+        total=5,
+        backoff_factor=20,
         status_forcelist=[500, 502, 503, 504],
         allowed_methods=["GET", "POST", "PUT", "DELETE"],
+        raise_on_status=False,
     )
     adapter = HTTPAdapter(max_retries=retry)
     session.mount("https://", adapter)
@@ -71,6 +70,7 @@ def build_session():
     return session
 
 SESSION = build_session()
+TIMEOUT = 60  # seconds per request
 
 # ============================================================
 #  📂  ALLOWED CATEGORIES
@@ -94,40 +94,36 @@ ALLOWED_CATEGORIES = [
 # ============================================================
 REFERRAL_LINKS = {
     "N26 Bank":               "https://germanysupport.de/go/n26",
-    "C24 Bank":               "https://germanysupport.de/go/c24",
-    "Commerzbank":            "https://germanysupport.de/go/n26",
-    "PayPal":               "https://germanysupport.de/go/PayPal",
+    "C24 Bank":               "https://germanysupport.de/go/c24bank",
+    "Commerzbank":            "https://germanysupport.de/go/commerzbank",
     "Advanzia Mastercard":    "https://germanysupport.de/go/advanzia",
-    "American Express":       "https://germanysupport.de/go/n26",
-    "Credit Card Comparison": "https://germanysupport.de/go/credit-cards",
+    "American Express":       "https://germanysupport.de/go/amex",
+    "Credit Card Comparison": "https://germanysupport.de/go/creditcard-compare",
     "Trade Republic":         "https://germanysupport.de/go/trade-republic",
-    "Metro Business Account": "https://germanysupport.de/go/credit-cards",
-    "Liability Insurance":    "https://germanysupport.de/go/haftpflicht",
-    "Legal Insurance":    "https://germanysupport.de/go/legal-insurance",
-    "Getsafe Haftpflicht":    "https://germanysupport.de/go/haftpflicht",
+    "Metro Business Account": "https://germanysupport.de/go/metro",
+    "Liability Insurance":    "https://germanysupport.de/go/liability-insurance",
+    "Getsafe Haftpflicht":    "https://germanysupport.de/go/getsafe",
     "HUK24 Car Insurance":    "https://germanysupport.de/go/huk24",
-    "Car Insurance Compare":  "https://germanysupport.de/go/car-insurance",
-    "SteuerGo Tax Tool":      "https://germanysupport.de/go/steuergo",
-    "WISO Steuer Software":   "https://germanysupport.de/go/wiso",
+    "Car Insurance Compare":  "https://germanysupport.de/go/car-insurance-compare",
+    "SteuerGo Tax Tool":      "https://germanysupport.de/go/steuergotax",
+    "WISO Steuer Software":   "https://germanysupport.de/go/wisotax",
     "Verivox DSL Internet":   "https://germanysupport.de/go/verivox-dsl",
-    "DSL Internet Check24":   "https://germanysupport.de/go/dsl-check24",
+    "DSL Internet Check24":   "https://germanysupport.de/go/check24-dsl",
     "Klarmobil Mobile Plan":  "https://germanysupport.de/go/klarmobil",
     "Check24 Mobile Plans":   "https://germanysupport.de/go/check24-mobile",
-    "Congstar Mobile":        "https://germanysupport.de/go/check24-mobile",
+    "Congstar Mobile":        "https://germanysupport.de/go/congstar",
     "Electricity Provider":   "https://germanysupport.de/go/electricity",
     "Gas Provider":           "https://germanysupport.de/go/gas",
-    "Check24 Travel":         "https://germanysupport.de/go/travel",
-    "Check24 Vacation":         "https://germanysupport.de/go/vacation",
-    "Check24 Car Rental":     "https://germanysupport.de/go/car-rental",
+    "Check24 Travel":         "https://germanysupport.de/go/check24-travel",
+    "Check24 Car Rental":     "https://germanysupport.de/go/check24-carrental",
     "ACE Money Transfer":     "https://germanysupport.de/go/ace-money",
     "TapTap Send":            "https://germanysupport.de/go/taptap",
     "Shoop Cashback":         "https://germanysupport.de/go/shoop",
     "iGraal Cashback":        "https://germanysupport.de/go/igraal",
-    "PAYBACK":                "https://germanysupport.de/go/payback",
 }
 
 # ============================================================
-#  🔧  AUTH
+#  🔧  AUTH & HTTP
 # ============================================================
 
 def build_auth_headers():
@@ -142,23 +138,26 @@ HEADERS = build_auth_headers()
 
 
 def wp_get(url, **kwargs):
+    kwargs.setdefault("timeout", TIMEOUT)
     r = SESSION.get(url, headers=HEADERS, **kwargs)
     r.raise_for_status()
     return r
 
 
-def wp_post_call(url, **kwargs):
+def wp_post_req(url, **kwargs):
+    kwargs.setdefault("timeout", TIMEOUT)
     r = SESSION.post(url, headers=HEADERS, **kwargs)
     if not r.ok:
-        raise Exception(f"WP POST error {r.status_code}: {r.text[:400]}")
+        raise Exception(f"POST error {r.status_code}: {r.text[:300]}")
     return r
 
 
 def wp_request(method, endpoint, **kwargs):
+    kwargs.setdefault("timeout", TIMEOUT)
     url = f"{WP_URL}/wp-json/wp/v2/{endpoint}"
     r   = SESSION.request(method, url, headers=HEADERS, **kwargs)
     if not r.ok:
-        raise Exception(f"WP API error {r.status_code}: {r.text[:400]}")
+        raise Exception(f"WP API {r.status_code}: {r.text[:300]}")
     return r.json()
 
 
@@ -175,20 +174,15 @@ def word_count(text):
 # ============================================================
 
 def parse_wp_date(date_str):
-    """Parse WordPress GMT date string to timezone-aware datetime."""
     try:
-        return datetime.strptime(date_str, "%Y-%m-%dT%H:%M:%S").replace(
-            tzinfo=timezone.utc
-        )
+        return datetime.strptime(
+            date_str, "%Y-%m-%dT%H:%M:%S"
+        ).replace(tzinfo=timezone.utc)
     except Exception:
         return None
 
 
 def is_recently_updated(post, months=4):
-    """
-    Returns True if the post was modified within the last `months` months.
-    Uses the modified_gmt field from WordPress.
-    """
     modified_str = post.get("modified_gmt", "") or post.get("modified", "")
     if not modified_str:
         return False
@@ -197,6 +191,61 @@ def is_recently_updated(post, months=4):
         return False
     cutoff = datetime.now(timezone.utc) - timedelta(days=months * 30)
     return modified > cutoff
+
+
+# ============================================================
+#  🎯  RANK MATH — CUSTOM ENDPOINT (reliable)
+# ============================================================
+
+def set_rank_math_keyword(post_id, focus_keyword, meta_title, meta_description):
+    """
+    Set Rank Math SEO data via our custom /wp-json/gs/v1/set-keyword endpoint.
+    This calls update_post_meta directly — works on all Rank Math versions.
+    Requires the 'Rank Math Keyword API' Code Snippet to be active.
+    Falls back to the native Rank Math API if custom endpoint not available.
+    """
+    # Method 1: Custom endpoint (most reliable)
+    try:
+        r = wp_post_req(
+            f"{WP_URL}/wp-json/gs/v1/set-keyword",
+            json={
+                "post_id":     post_id,
+                "keyword":     focus_keyword,
+                "title":       meta_title,
+                "description": meta_description,
+            },
+        )
+        if r.ok:
+            data = r.json()
+            if data.get("success"):
+                print(f"  Rank Math: keyword set via custom endpoint ✓")
+                return True
+    except Exception as e:
+        print(f"  Custom endpoint error: {e}")
+
+    # Method 2: Native Rank Math REST API fallback
+    try:
+        r2 = wp_post_req(
+            f"{WP_URL}/wp-json/rankmath/v1/updateMeta",
+            json={
+                "objectID":   post_id,
+                "objectType": "post",
+                "meta": {
+                    "rank_math_focus_keyword": focus_keyword,
+                    "rank_math_title":         meta_title,
+                    "rank_math_description":   meta_description,
+                },
+            },
+        )
+        if r2.ok:
+            print(f"  Rank Math: keyword set via native API ✓")
+            return True
+    except Exception as e:
+        print(f"  Native API error: {e}")
+
+    print(f"  Rank Math: both methods failed.")
+    print(f"  → Set manually: '{focus_keyword}'")
+    return False
 
 
 # ============================================================
@@ -233,9 +282,9 @@ def extract_text_from_elementor(elementor_data_str):
             wt       = obj.get("widgetType", "")
             settings = obj.get("settings", {})
             if wt in ("text-editor", "theme-post-content"):
-                content = settings.get("editor", "") or settings.get("content", "")
-                if content:
-                    texts.append(strip_html(content))
+                c = settings.get("editor", "") or settings.get("content", "")
+                if c:
+                    texts.append(strip_html(c))
             elif wt == "heading":
                 t = settings.get("title", "")
                 if t:
@@ -284,12 +333,12 @@ def fetch_elementor_raw_data(post_id):
 
 
 def save_elementor_data(post_id, elementor_data_str):
-    r = wp_post_call(
+    r = wp_post_req(
         f"{WP_URL}/wp-json/wp/v2/posts/{post_id}",
         json={"meta": {"_elementor_data": elementor_data_str}},
     )
     if not r.ok:
-        raise Exception(f"Elementor save failed: {r.status_code} {r.text[:200]}")
+        raise Exception(f"Elementor save failed: {r.status_code}")
 
 
 # ============================================================
@@ -346,9 +395,7 @@ def parse_claude_json(raw_text):
 # ============================================================
 
 def get_relevant_links(title, content_text):
-    """Return relevant affiliate links for this article topic."""
     combined = (title + " " + content_text).lower()
-
     relevance_map = {
         "N26 Bank":               ["bank", "account", "banking", "girokonto"],
         "C24 Bank":               ["bank", "account", "banking", "girokonto"],
@@ -378,18 +425,15 @@ def get_relevant_links(title, content_text):
         "Shoop Cashback":         ["cashback", "saving", "discount", "deals"],
         "iGraal Cashback":        ["cashback", "saving", "discount", "deals"],
     }
-
     relevant = {
         name: REFERRAL_LINKS[name]
         for name, keywords in relevance_map.items()
         if any(kw in combined for kw in keywords)
     }
-
     if len(relevant) < 2:
         relevant["N26 Bank"]          = REFERRAL_LINKS["N26 Bank"]
         relevant["Shoop Cashback"]    = REFERRAL_LINKS["Shoop Cashback"]
         relevant["SteuerGo Tax Tool"] = REFERRAL_LINKS["SteuerGo Tax Tool"]
-
     return relevant
 
 
@@ -403,92 +447,41 @@ def verify_links(content_html, relevant_links):
 def inject_missing_links(content_html, missing_links, focus_keyword):
     if not missing_links:
         return content_html
-    print(f"  Pass 3: injecting {len(missing_links)} missing affiliate links...")
+    print(f"  Pass 3: injecting {len(missing_links)} missing links...")
     client    = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
     links_str = "\n".join([f"- {name}: {url}" for name, url in missing_links])
-
-    response = client.messages.create(
+    response  = client.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=4096,
         system="""
 You are an HTML editor embedding affiliate links into article content.
-Rules:
 - Find the most relevant sentence for each link
-- Embed as: <a href="URL" target="_blank" rel="nofollow sponsored">descriptive anchor text</a>
-- Anchor text must be natural and descriptive, not just the company name
+- Embed as: <a href="URL" target="_blank" rel="nofollow sponsored">descriptive text</a>
+- Anchor text must be natural and descriptive
 - Only embed where genuinely relevant
-- Return the COMPLETE modified HTML — do not shorten
-- Do not add any disclosure boxes or extra content
+- Return the COMPLETE modified HTML — do not shorten or summarize
+- Do not add any disclosure boxes
 """,
         messages=[{
             "role": "user",
             "content": f"""
 Add these affiliate links naturally into the article.
 
-LINKS TO ADD:
+LINKS:
 {links_str}
 
-ARTICLE HTML:
+ARTICLE:
 {content_html}
 
 Return the COMPLETE article HTML with links embedded.
 """,
         }],
     )
-
     result = response.content[0].text.strip()
     result = re.sub(r"^```html\s*", "", result)
     result = re.sub(r"^```\s*",     "", result)
     result = re.sub(r"```$",        "", result).strip()
     return result
-
-
-# ============================================================
-#  🎯  RANK MATH NATIVE API
-# ============================================================
-
-def update_rank_math_seo(post_id, focus_keyword, meta_title, meta_description):
-    try:
-        r = SESSION.post(
-            f"{WP_URL}/wp-json/rankmath/v1/updateMeta",
-            headers=HEADERS,
-            json={
-                "objectID":   post_id,
-                "objectType": "post",
-                "meta": {
-                    "rank_math_focus_keyword": focus_keyword,
-                    "rank_math_title":         meta_title,
-                    "rank_math_description":   meta_description,
-                    "rank_math_robots":        ["index", "follow"],
-                },
-            },
-        )
-        if r.ok:
-            print(f"  Rank Math: updated ✓")
-            return True
-
-        form_hdrs = dict(HEADERS)
-        form_hdrs["Content-Type"] = "application/x-www-form-urlencoded"
-        r2 = SESSION.post(
-            f"{WP_URL}/wp-json/rankmath/v1/updateMeta",
-            headers=form_hdrs,
-            data={
-                "objectID":                post_id,
-                "objectType":              "post",
-                "rank_math_focus_keyword": focus_keyword,
-                "rank_math_title":         meta_title,
-                "rank_math_description":   meta_description,
-            },
-        )
-        if r2.ok:
-            print(f"  Rank Math: updated ✓")
-            return True
-
-        print(f"  Rank Math: failed — set keyword manually: '{focus_keyword}'")
-        return False
-    except Exception as e:
-        print(f"  Rank Math error: {e}")
-        return False
 
 
 # ============================================================
@@ -503,11 +496,11 @@ def fetch_all_english_posts():
         r = wp_get(
             f"{WP_URL}/wp-json/wp/v2/posts",
             params={
-                "per_page":    20,
-                "page":        page,
-                "status":      "publish",
-                "context":     "edit",
-                "_fields":     (
+                "per_page":  20,
+                "page":      page,
+                "status":    "publish",
+                "context":   "edit",
+                "_fields":   (
                     "id,title,slug,content,excerpt,tags,"
                     "categories,link,lang,featured_media,"
                     "meta,modified_gmt"
@@ -658,9 +651,8 @@ def update_image_alt(media_id, focus_keyword, title):
     if not media_id:
         return
     try:
-        SESSION.post(
+        wp_post_req(
             f"{WP_URL}/wp-json/wp/v2/media/{media_id}",
-            headers=HEADERS,
             json={"alt_text": f"{focus_keyword} — {title[:60]}"},
         )
         print(f"  Image alt text updated.")
@@ -705,7 +697,7 @@ def resolve_category_ids(chosen, wp_cat_map):
         if best_key and best_score >= 0.60:
             ids.append(wp_cat_map[best_key])
         else:
-            print(f"    WARNING: no category match for '{name}'")
+            print(f"    WARNING: no match for '{name}'")
     if not ids:
         fb = "living in germany"
         if fb in wp_cat_map:
@@ -758,34 +750,34 @@ def rewrite_pass1(title, current_text, wc, is_short, related, relevant_links):
             for p in related
         ])
 
-    target_words = max(MIN_WORD_COUNT, wc)
-    length_note  = (
+    target = max(MIN_WORD_COUNT, wc)
+    length = (
         f"EXPAND to at least {MIN_WORD_COUNT} words — currently only ~{wc}."
         if is_short else
-        f"Write approximately {target_words}+ words. Do NOT shorten."
+        f"Write approximately {target}+ words. Do NOT shorten."
     )
 
     system = f"""
 You are an expert SEO writer for an expat guide website about Germany.
-Optimizing for Rank Math SEO. Today's year is {CURRENT_YEAR}.
+Optimizing for Rank Math SEO. Current year: {CURRENT_YEAR}.
 
 RANK MATH REQUIREMENTS (all mandatory):
 1. Focus keyword in the VERY FIRST sentence
 2. Focus keyword near the start of the SEO title
-3. Focus keyword in meta description within first 10 words
+3. Focus keyword in meta description (first 10 words)
 4. Focus keyword in at least 2 H2 headings
-5. Keyword density ~1% (every 100-150 words)
+5. Keyword density ~1% (use every 100-150 words)
 6. Slug under {MAX_SLUG_LENGTH} chars, contains focus keyword
 
 CONTENT:
-- {length_note}
-- Update ALL information to {CURRENT_YEAR} — remove any outdated years
-- Replace any year references (2023, 2024, 2025 etc.) with {CURRENT_YEAR} where applicable
-- H2 and H3 structure throughout
-- Do NOT add FAQ section (comes separately)
+- {length}
+- Update ALL information to {CURRENT_YEAR}
+- Replace outdated year references with {CURRENT_YEAR}
+- Clear H2/H3 structure throughout
+- Do NOT add FAQ (separate pass)
 - Do NOT add any affiliate disclosure box
 
-AFFILIATE LINKS — MANDATORY — ALL MUST APPEAR:
+AFFILIATE LINKS — MANDATORY — ALL MUST APPEAR IN CONTENT:
 {links_str}{related_str}
 
 JSON RULES:
@@ -794,7 +786,7 @@ JSON RULES:
 - Complete valid JSON
 - Slug max {MAX_SLUG_LENGTH} chars
 
-CATEGORIES — 1-2, exact names:
+CATEGORIES — 1-2 only, exact names:
 {cats_str}
 
 Return ONLY this JSON:
@@ -802,8 +794,8 @@ Return ONLY this JSON:
   "title": "Focus Keyword: Title {CURRENT_YEAR}",
   "slug": "focus-keyword-slug",
   "meta_title": "Focus Keyword | GermanySupport.de",
-  "meta_description": "Focus keyword first. 150-155 chars.",
-  "focus_keyword": "exact focus keyword",
+  "meta_description": "Focus keyword first. 150-155 chars exactly.",
+  "focus_keyword": "exact focus keyword phrase",
   "tags": ["tag1", "tag2", "tag3", "tag4", "tag5"],
   "categories": ["Category Name"],
   "content": "Complete HTML — all affiliate links, NO FAQ, NO disclosure"
@@ -814,12 +806,12 @@ Return ONLY this JSON:
 Rewrite for Rank Math SEO. Year: {CURRENT_YEAR}.
 
 TITLE: {title}
-WORDS: ~{wc} → target {target_words}+
+WORDS: ~{wc} → target {target}+
 
 CONTENT:
 {current_text}
 
-ALL affiliate links above are MANDATORY — every single one must appear.
+ALL affiliate links above are MANDATORY.
 Return COMPLETE JSON only.
 """
 
@@ -828,13 +820,10 @@ Return COMPLETE JSON only.
 
 def rewrite_pass2_faq(title, focus_keyword, content_summary):
     system = f"""
-You write FAQ sections for expat guides about Germany.
-Today's year is {CURRENT_YEAR}.
-
-Rules:
+Write FAQ sections for expat guides about Germany ({CURRENT_YEAR}).
 - Start: <h2 id="faq">Frequently Asked Questions</h2>
 - 5-6 questions as <h3>Question?</h3>
-- Answers as <p>2-4 detailed sentences, accurate for {CURRENT_YEAR}.</p>
+- Answers as <p>2-4 sentences, accurate for {CURRENT_YEAR}.</p>
 - Include focus keyword in 1-2 questions
 - Return ONLY HTML, no JSON, no explanation
 """
@@ -842,9 +831,7 @@ Rules:
 Write FAQ for:
 TITLE: {title}
 KEYWORD: {focus_keyword}
-YEAR: {CURRENT_YEAR}
 SUMMARY: {content_summary[:1000]}
-
 Return ONLY the FAQ HTML.
 """
     return claude_call(system, user, max_tokens=1200)
@@ -855,22 +842,17 @@ Return ONLY the FAQ HTML.
 # ============================================================
 
 def assemble_content(optimized, related):
-    content = optimized["content"]
-    content = inject_anchors(content)
+    content = inject_anchors(optimized["content"])
 
-    # TOC after first paragraph
     first_p = re.search(r'(<p>.*?</p>)', content, re.DOTALL | re.IGNORECASE)
     toc     = build_toc(content)
     if first_p and toc:
         content = (
-            content[:first_p.end()]
-            + "\n" + toc + "\n"
-            + content[first_p.end():]
+            content[:first_p.end()] + "\n" + toc + "\n" + content[first_p.end():]
         )
     elif toc:
         content = toc + "\n" + content
 
-    # Internal links before FAQ
     il_html = build_internal_links_html(related)
     if il_html:
         faq = re.search(
@@ -879,9 +861,7 @@ def assemble_content(optimized, related):
         )
         if faq:
             content = (
-                content[:faq.start()]
-                + il_html + "\n"
-                + content[faq.start():]
+                content[:faq.start()] + il_html + "\n" + content[faq.start():]
             )
         else:
             content += "\n" + il_html
@@ -915,8 +895,6 @@ def process_elementor(post, optimized, final_content, cat_ids, tag_ids):
         updated_el = update_elementor_content(raw_el, final_content)
         save_elementor_data(post_id, updated_el)
         print(f"  Elementor data updated.")
-    else:
-        print(f"  No Elementor data — updating post_content only.")
     return update_wp_post(post_id, optimized, final_content, cat_ids, tag_ids)
 
 
@@ -925,34 +903,39 @@ def process_elementor(post, optimized, final_content, cat_ids, tag_ids):
 # ============================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="GermanySupport SEO Optimizer v8")
-    parser.add_argument("--limit",   type=int,  default=None,
-                        help="Max articles to process")
-    parser.add_argument("--post-id", type=int,  default=None,
-                        help="Single post ID")
+    parser = argparse.ArgumentParser(description="GermanySupport SEO Optimizer v9")
+    parser.add_argument("--limit",   type=int,  default=None)
+    parser.add_argument("--post-id", type=int,  default=None)
     parser.add_argument("--force",   action="store_true",
-                        help="Ignore last-updated date — rewrite all articles")
+                        help="Rewrite all articles regardless of modified date")
     args = parser.parse_args()
 
     print("=" * 62)
-    print(f"  GermanySupport.de — SEO Optimizer v8 ({CURRENT_YEAR})")
-    print("  Auto-year | Skip-recent | Retry | Rank Math | EN+EL")
+    print(f"  GermanySupport.de — SEO Optimizer v9 ({CURRENT_YEAR})")
+    print("  Custom keyword endpoint | Two-pass | Gutenberg + Elementor")
     print("=" * 62)
-    print(f"  Current year detected: {CURRENT_YEAR}")
-    if not args.force:
-        print(f"  Skipping articles updated in last "
-              f"{SKIP_IF_NEWER_THAN_MONTHS} months "
-              f"(use --force to override)")
+    print(f"  Year: {CURRENT_YEAR} (auto-detected)")
 
-    # 1. Rank Math check
-    print("\n[1] Checking Rank Math API...")
+    # 1. Verify custom keyword endpoint is working
+    print("\n[1] Checking custom Rank Math keyword endpoint...")
     try:
-        rm_check = SESSION.get(
-            f"{WP_URL}/wp-json/rankmath/v1/", headers=HEADERS
+        test = wp_post_req(
+            f"{WP_URL}/wp-json/gs/v1/set-keyword",
+            json={"post_id": 0, "keyword": "test"},
         )
-        print(f"    Rank Math: {'available ✓' if rm_check.ok else 'unavailable'}")
-    except Exception:
-        print("    Rank Math: connection check failed — will try during run")
+        # Expects a 400 (missing post_id validation) or 200 — either means endpoint exists
+        print("    Custom endpoint: available ✓")
+        custom_endpoint_ok = True
+    except Exception as e:
+        err = str(e)
+        if "400" in err or "missing" in err.lower():
+            print("    Custom endpoint: available ✓")
+            custom_endpoint_ok = True
+        else:
+            print(f"    Custom endpoint: NOT found — {err[:80]}")
+            print("    → Add the Code Snippet first, then re-run")
+            print("    → Falling back to native Rank Math API")
+            custom_endpoint_ok = False
 
     # 2. Categories
     print("\n[2] Fetching categories...")
@@ -979,27 +962,24 @@ def main():
         print("    No posts found.")
         return
 
-    # 5. Filter recently updated posts (unless --force)
+    # 5. Filter recently updated
     if not args.force and not args.post_id:
         before = len(posts)
-        posts  = [
-            p for p in posts
-            if not is_recently_updated(p, SKIP_IF_NEWER_THAN_MONTHS)
-        ]
-        skipped_recent = before - len(posts)
-        print(f"    Skipping {skipped_recent} recently updated posts.")
+        posts  = [p for p in posts if not is_recently_updated(
+            p, SKIP_IF_NEWER_THAN_MONTHS
+        )]
+        print(f"    Skipping {before - len(posts)} recently updated posts.")
         print(f"    Will optimize {len(posts)} articles.")
 
     if not posts:
-        print("\n    All articles were updated recently — nothing to do.")
-        print("    Use --force to rewrite all articles regardless.")
+        print("\n    All articles recently updated. Use --force to override.")
         return
 
     # 6. Optimize loop
     print(f"\n[5] Optimizing {len(posts)} articles...")
     print("=" * 62)
 
-    results = {"success": [], "failed": [], "skipped_recent": []}
+    results = {"success": [], "failed": []}
     total   = len(posts)
 
     for i, post in enumerate(posts, 1):
@@ -1007,7 +987,7 @@ def main():
         title    = post["title"]["rendered"]
         media_id = post.get("featured_media") or None
         editor   = detect_editor(post)
-        modified = post.get("modified_gmt", "unknown")
+        modified = post.get("modified_gmt", "unknown")[:10]
 
         # Get content
         if editor == "elementor":
@@ -1025,40 +1005,34 @@ def main():
         wc       = len(current_text.split())
         is_short = wc < MIN_WORD_COUNT
 
-        print(f"\n[{i}/{total}] Post ID {post_id} [{editor.upper()}]")
-        print(f"  Title    : {title[:65]}")
-        print(f"  Modified : {modified[:10]}")
-        print(f"  Words    : {wc} {'— SHORT' if is_short else '— OK'}")
+        print(f"\n[{i}/{total}] Post {post_id} [{editor.upper()}] modified:{modified}")
+        print(f"  Title : {title[:65]}")
+        print(f"  Words : {wc} {'— SHORT' if is_short else '— OK'}")
 
         try:
-            # Relevant affiliate links
+            # Relevant links + related posts
             relevant_links = get_relevant_links(title, current_text)
-            print(f"  Links    : {len(relevant_links)} relevant affiliate links")
-
-            # Related posts
-            related = find_related_posts(post_id, title, all_refs)
-            print(f"  Related  : {len(related)} internal links")
+            related        = find_related_posts(post_id, title, all_refs)
+            print(f"  Links : {len(relevant_links)} affiliate | {len(related)} internal")
 
             # Pass 1: article body
-            print("  Pass 1: rewriting article body...")
+            print("  Pass 1: rewriting...")
             optimized = rewrite_pass1(
                 title, current_text, wc, is_short, related, relevant_links
             )
 
-            # Verify affiliate links
+            # Verify + inject missing links
             missing = verify_links(optimized["content"], relevant_links)
-            print(f"  Links    : {len(relevant_links)-len(missing)}/{len(relevant_links)} present after Pass 1")
-
-            # Pass 3: inject missing links if needed
+            print(f"  Links : {len(relevant_links)-len(missing)}/{len(relevant_links)} present")
             if missing:
                 optimized["content"] = inject_missing_links(
                     optimized["content"], missing, optimized["focus_keyword"]
                 )
-                still_missing = verify_links(optimized["content"], relevant_links)
-                print(f"  Links    : {len(relevant_links)-len(still_missing)}/{len(relevant_links)} after injection")
+                still = verify_links(optimized["content"], relevant_links)
+                print(f"  Links : {len(relevant_links)-len(still)}/{len(relevant_links)} after injection")
 
             # Pass 2: FAQ
-            print("  Pass 2: generating FAQ...")
+            print("  Pass 2: FAQ...")
             faq_html = rewrite_pass2_faq(
                 optimized["title"],
                 optimized["focus_keyword"],
@@ -1067,10 +1041,9 @@ def main():
             optimized["content"] += "\n" + faq_html
 
             new_wc = word_count(optimized["content"])
-            print(f"  New title : {optimized['title'][:60]}")
-            print(f"  Focus KW  : {optimized['focus_keyword']}")
-            print(f"  Meta      : {len(optimized['meta_description'])} chars")
-            print(f"  New words : {new_wc}")
+            print(f"  KW    : {optimized['focus_keyword']}")
+            print(f"  Meta  : {len(optimized['meta_description'])} chars")
+            print(f"  Words : {wc} → {new_wc}")
 
             # Assemble
             final = assemble_content(optimized, related)
@@ -1079,27 +1052,20 @@ def main():
             cat_ids = resolve_category_ids(optimized["categories"], wp_cat_map)
             tag_ids = sync_tags(optimized["tags"])
 
-            # Update
+            # Update post
             if editor == "elementor":
-                print("  Updating Elementor post...")
-                updated = process_elementor(
-                    post, optimized, final, cat_ids, tag_ids
-                )
+                updated = process_elementor(post, optimized, final, cat_ids, tag_ids)
             else:
-                print("  Updating Gutenberg post...")
-                updated = update_wp_post(
-                    post_id, optimized, final, cat_ids, tag_ids
-                )
+                updated = update_wp_post(post_id, optimized, final, cat_ids, tag_ids)
 
             url = updated["link"]
-            print(f"  Updated  : {url}")
+            print(f"  Saved : {url}")
 
-            # Rank Math
+            # Set Rank Math keyword
             meta_title = optimized.get(
-                "meta_title",
-                f"{optimized['title']} | GermanySupport.de"
+                "meta_title", f"{optimized['title']} | GermanySupport.de"
             )
-            rm_ok = update_rank_math_seo(
+            rm_ok = set_rank_math_keyword(
                 post_id,
                 optimized["focus_keyword"],
                 meta_title,
@@ -1133,44 +1099,39 @@ def main():
 
     # 7. Summary
     print("\n" + "=" * 62)
-    print(f"  OPTIMIZATION COMPLETE — {CURRENT_YEAR}")
+    print(f"  COMPLETE — {CURRENT_YEAR}")
     print("=" * 62)
-    g_ok     = [r for r in results["success"] if r["editor"] == "gutenberg"]
-    e_ok     = [r for r in results["success"] if r["editor"] == "elementor"]
     rm_count = len([r for r in results["success"] if r["rm_ok"]])
-
-    print(f"  Year used         : {CURRENT_YEAR} (auto-detected)")
-    print(f"  Total processed   : {total}")
-    print(f"  Success           : {len(results['success'])}")
-    print(f"    Gutenberg       : {len(g_ok)}")
-    print(f"    Elementor       : {len(e_ok)}")
-    print(f"  Rank Math updated : {rm_count}/{len(results['success'])}")
-    print(f"  Failed            : {len(results['failed'])}")
+    print(f"  Year used  : {CURRENT_YEAR}")
+    print(f"  Total      : {total}")
+    print(f"  Success    : {len(results['success'])}")
+    print(f"  Keyword set: {rm_count}/{len(results['success'])}")
+    print(f"  Failed     : {len(results['failed'])}")
 
     if results["success"]:
-        print("\n  Updated:")
+        print("\n  Updated articles:")
         for r in results["success"]:
-            rm = "✓ RM" if r["rm_ok"] else "✗ RM manual"
-            print(f"  [{r['editor'][0].upper()}][{r['id']}] "
-                  f"{r['title'][:48]} [{rm}]")
-            print(f"         KW: {r['keyword']}")
-            print(f"         {r['old_words']}w → {r['new_words']}w")
+            rm = "✓ KW" if r["rm_ok"] else "✗ KW manual"
+            ed = r["editor"][0].upper()
+            print(f"  [{ed}][{r['id']}] {r['title'][:48]} [{rm}]")
+            print(f"         {r['old_words']}w → {r['new_words']}w | {r['keyword']}")
             print(f"         {r['url']}")
 
     need_rm = [r for r in results["success"] if not r["rm_ok"]]
     if need_rm:
         print("\n" + "=" * 62)
         print("  SET FOCUS KEYWORDS MANUALLY IN RANK MATH:")
+        print("  WP editor → Rank Math panel → Focus Keyword field")
         print("=" * 62)
         for r in need_rm:
             print(f"  [{r['id']}] Keyword: {r['keyword']}")
             print(f"         {r['url']}")
 
     if results["failed"]:
-        print("\n  Failed (retry by running again):")
+        print("\n  Failed (run again to retry):")
         for r in results["failed"]:
             print(f"  [{r['id']}] {r['title'][:55]}")
-            print(f"         {r['error'][:120]}")
+            print(f"         {r['error'][:100]}")
 
     print("=" * 62)
 
