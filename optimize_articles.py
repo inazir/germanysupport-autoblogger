@@ -1,5 +1,5 @@
 """
-GermanySupport.de — SEO Optimizer v10
+GermanySupport.de — SEO Optimizer v11
 ======================================
 Imports all shared config from config.py (single source of truth).
 
@@ -19,6 +19,7 @@ Usage:
   python optimize_articles.py --limit 5        # first 5 (test)
   python optimize_articles.py --post-id 123    # single post
   python optimize_articles.py --force          # ignore last-updated date
+  python optimize_articles.py --days 1         # skip posts modified today
 """
 
 import os
@@ -28,7 +29,10 @@ import time
 import base64
 import sys
 import argparse
+from pathlib import Path
 from datetime import datetime, timezone, timedelta
+
+from dotenv import load_dotenv
 from difflib import SequenceMatcher
 
 import anthropic
@@ -40,11 +44,15 @@ from urllib3.util.retry import Retry
 from config import (
     CURRENT_YEAR,
     ALLOWED_CATEGORIES,
-    REFERRAL_LINKS,
+    fetch_referral_links,
     get_relevant_links,
     format_links_as_html,
     TAPTAP_PROMO_HTML,
+    build_referral_replacement_map,
 )
+
+SCRIPT_DIR = Path(__file__).parent
+load_dotenv(SCRIPT_DIR / ".env")
 
 # ============================================================
 #  🔑  CREDENTIALS
@@ -60,7 +68,7 @@ ANTHROPIC_KEY = os.environ["ANTHROPIC_KEY"]
 MIN_WORD_COUNT            = 1200
 DELAY_BETWEEN             = 12
 MAX_SLUG_LENGTH           = 60
-SKIP_IF_NEWER_THAN_MONTHS = 4
+SKIP_IF_NEWER_THAN_DAYS   = 120
 TIMEOUT                   = 60
 
 # ============================================================
@@ -90,6 +98,7 @@ def build_auth_headers():
     return {"Authorization": f"Basic {token}", "Content-Type": "application/json"}
 
 HEADERS = build_auth_headers()
+REFERRAL_REPLACEMENT_MAP = build_referral_replacement_map(WP_URL, force=True)
 
 
 def wp_get(url, **kwargs):
@@ -136,11 +145,11 @@ def parse_wp_date(date_str):
         return None
 
 
-def is_recently_updated(post, months=4):
+def is_recently_updated(post, days=SKIP_IF_NEWER_THAN_DAYS):
     d = parse_wp_date(post.get("modified_gmt", "") or "")
     if not d:
         return False
-    return d > datetime.now(timezone.utc) - timedelta(days=months * 30)
+    return d > datetime.now(timezone.utc) - timedelta(days=days)
 
 
 # ============================================================
@@ -299,13 +308,96 @@ def parse_claude_json(raw_text):
     print("  JSON malformed — asking Claude to repair...")
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
     repair = client.messages.create(
-        model="claude-sonnet-4-20250514", max_tokens=4096,
+        model="claude-sonnet-4-20250514", max_tokens=8192,
         messages=[{"role": "user", "content":
             "Fix this malformed JSON. Return ONLY valid JSON:\n\n" + text[:3000]}])
     r = repair.content[0].text.strip()
     r = re.sub(r"^```json\s*", "", r)
     r = re.sub(r"```$", "", r).strip()
     return json.loads(r)
+
+
+# ============================================================
+#  🔒  CANONICAL /go/ LINK ENFORCEMENT
+# ============================================================
+
+def enforce_go_links(html, wp_base, replacement_map):
+    """
+    Canonicalise affiliate URLs to germanysupport.de/go/{slug} using the
+    strict replacement map derived from the WordPress referral endpoint.
+
+    Fixes:
+    - direct affiliate links inside <a href="...">
+    - bare text URLs pasted into content
+    - malformed internal links such as /go/ace/referral-link/872856
+    """
+    replacements = []
+
+    malformed_go_re = re.compile(
+        re.escape(wp_base.rstrip("/")) + r"/go/([a-z0-9-]+)(?:/[^\s\"'<>\(\)]+)+",
+        flags=re.IGNORECASE,
+    )
+
+    def normalise_internal(match):
+        slug = match.group(1).lower()
+        old = match.group(0)
+        new = f"{wp_base.rstrip('/')}/go/{slug}"
+        if old != new:
+            replacements.append((old, new))
+        return new
+
+    html = malformed_go_re.sub(normalise_internal, html)
+
+    def resolve_go_url(url):
+        if url.startswith(wp_base) and '/go/' in url:
+            m = re.search(r'/go/([a-z0-9-]+)', url, flags=re.IGNORECASE)
+            if m:
+                return f"{wp_base.rstrip('/')}/go/{m.group(1).lower()}"
+
+        if url in replacement_map:
+            return replacement_map[url]
+
+        best_pattern = None
+        best_replacement = None
+        for pattern, go_url in replacement_map.items():
+            if pattern in url:
+                if best_pattern is None or len(pattern) > len(best_pattern):
+                    best_pattern = pattern
+                    best_replacement = go_url
+        return best_replacement
+
+    def replace_href(match):
+        full_tag = match.group(0)
+        href_val = match.group(1)
+
+        if href_val.startswith(wp_base) and '/go/' not in href_val:
+            return full_tag
+
+        new_url = resolve_go_url(href_val)
+        if new_url and new_url != href_val:
+            replacements.append((href_val, new_url))
+            return full_tag.replace(href_val, new_url)
+        return full_tag
+
+    html = re.sub(
+        r"<a[^>]+href=[\"']([^\"']+)[\"'][^>]*>",
+        replace_href,
+        html,
+        flags=re.IGNORECASE,
+    )
+
+    url_re = re.compile(r"(?<![\"'=])(https?://[^\s<>()]+)", flags=re.IGNORECASE)
+
+    def replace_bare_url(match):
+        url = match.group(1)
+        new_url = resolve_go_url(url)
+        if new_url and new_url != url:
+            replacements.append((url, new_url))
+            return new_url
+        return url
+
+    html = url_re.sub(replace_bare_url, html)
+    return html, replacements
 
 
 # ============================================================
@@ -327,7 +419,7 @@ def inject_missing_links(content_html, missing_links):
         for n, u in missing_links
     ])
     r = client.messages.create(
-        model="claude-sonnet-4-20250514", max_tokens=4096,
+        model="claude-sonnet-4-20250514", max_tokens=8192,
         system="""Embed affiliate links into HTML content naturally.
 - Use: <a href="URL" target="_blank" rel="nofollow sponsored">descriptive text</a>
 - For TapTap Send: mention the promo code IQBAL12 and €10 bonus in the anchor text or nearby
@@ -513,7 +605,7 @@ def sync_tags(tag_names):
 #  🤖  CLAUDE — TWO-PASS REWRITE
 # ============================================================
 
-def claude_call(system_prompt, user_prompt, max_tokens=4096):
+def claude_call(system_prompt, user_prompt, max_tokens=8192):
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
     r = client.messages.create(
         model="claude-sonnet-4-20250514", max_tokens=max_tokens,
@@ -690,11 +782,13 @@ def main():
     parser.add_argument("--limit",   type=int,  default=None)
     parser.add_argument("--post-id", type=int,  default=None)
     parser.add_argument("--force",   action="store_true")
+    parser.add_argument("--days",    type=int, default=SKIP_IF_NEWER_THAN_DAYS,
+                        help="Skip posts modified in the last N days (default: 120)")
     args = parser.parse_args()
 
     print("=" * 62)
     print(f"  GermanySupport.de — SEO Optimizer v10 ({CURRENT_YEAR})")
-    print("  config.py | Rank Math 80+ | TapTap IQBAL12 | No removed products")
+    print("  config.py | dynamic /go links | Rank Math 80+ | TapTap IQBAL12")
     print("=" * 62)
 
     # 1. Check custom endpoint
@@ -709,6 +803,8 @@ def main():
         else:
             print(f"    Custom endpoint: NOT found — add Code Snippet first")
             print(f"    Falling back to native Rank Math API")
+
+    fetch_referral_links(WP_URL, force=True)
 
     # 2. Categories
     print("\n[2] Fetching categories...")
@@ -738,11 +834,11 @@ def main():
     # 5. Filter recently updated
     if not args.force and not args.post_id:
         before = len(posts)
-        posts  = [p for p in posts if not is_recently_updated(p, SKIP_IF_NEWER_THAN_MONTHS)]
-        print(f"    Skipping {before - len(posts)} recently updated. Will process {len(posts)}.")
+        posts  = [p for p in posts if not is_recently_updated(p, args.days)]
+        print(f"    Skipping {before - len(posts)} posts modified in last {args.days} day(s). Will process {len(posts)}.")
 
     if not posts:
-        print("\n    All articles recently updated. Use --force to override.")
+        print(f"\n    All articles were modified in the last {args.days} day(s). Use --force to override.")
         return
 
     # 6. Optimize loop
@@ -775,7 +871,7 @@ def main():
         print(f"  Words : {wc} {'— SHORT' if is_short else '— OK'}")
 
         try:
-            rel_links = get_relevant_links(title, curr)
+            rel_links = get_relevant_links(title, curr, WP_URL)
             related   = find_related(pid, title, all_refs)
             print(f"  Links : {len(rel_links)} affiliate | {len(related)} internal")
 
@@ -783,11 +879,22 @@ def main():
             print("  Pass 1: rewriting...")
             optimized = rewrite_pass1(title, curr, wc, is_short, related, rel_links)
 
+            optimized["content"], swaps = enforce_go_links(
+                optimized["content"], WP_URL, REFERRAL_REPLACEMENT_MAP
+            )
+            if swaps:
+                print(f"  /go/ enforcement: replaced {len(swaps)} raw/malformed URL(s)")
+
             # Verify + inject
             missing = verify_links(optimized["content"], rel_links)
             print(f"  Links : {len(rel_links)-len(missing)}/{len(rel_links)} present")
             if missing:
                 optimized["content"] = inject_missing_links(optimized["content"], missing)
+                optimized["content"], swaps2 = enforce_go_links(
+                    optimized["content"], WP_URL, REFERRAL_REPLACEMENT_MAP
+                )
+                if swaps2:
+                    print(f"  /go/ enforcement after injection: {len(swaps2)} replacement(s)")
                 still = verify_links(optimized["content"], rel_links)
                 print(f"  Links : {len(rel_links)-len(still)}/{len(rel_links)} after injection")
 
@@ -799,6 +906,11 @@ def main():
                 strip_html(optimized["content"])[:2000],
             )
             optimized["content"] += "\n" + faq
+            optimized["content"], swaps3 = enforce_go_links(
+                optimized["content"], WP_URL, REFERRAL_REPLACEMENT_MAP
+            )
+            if swaps3:
+                print(f"  /go/ enforcement after FAQ: {len(swaps3)} replacement(s)")
 
             new_wc = word_count(optimized["content"])
             print(f"  KW    : {optimized['focus_keyword']}")
