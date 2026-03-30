@@ -48,6 +48,9 @@ from config import (
     TAPTAP_PROMO_HTML,
 )
 
+# ============================================================
+#  📝  LOGGING
+# ============================================================
 SCRIPT_DIR = Path(__file__).parent
 LOG_DIR    = SCRIPT_DIR / "logs"
 CACHE_DIR  = SCRIPT_DIR / "cache"
@@ -66,20 +69,37 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+# ============================================================
+#  🔑  CREDENTIALS
+# ============================================================
 WP_URL        = os.environ["WP_URL"].rstrip("/")
 WP_USER       = os.environ["WP_USER"]
 WP_APP_PASS   = os.environ["WP_APP_PASS"]
 ANTHROPIC_KEY = os.environ["ANTHROPIC_KEY"]
 PEXELS_KEY    = os.environ["PEXELS_KEY"]
 
+# ============================================================
+#  ⚙️  SETTINGS
+# ============================================================
 CLAUDE_MODEL    = "claude-sonnet-4-20250514"
 MAX_TOKENS      = 6000
 RETRY_MAX       = 5
 RETRY_BASE_SECS = 10
 
+# ============================================================
+#  🔒  DIRECT AFFILIATE URL → /go/ REPLACEMENT MAP
+# ============================================================
 LIVE_DIRECT_TO_GO_MAP = {}
 
 def enforce_go_links(html: str, wp_base: str) -> tuple:
+    """
+    Canonicalise affiliate URLs to germanysupport.de/go/{slug}.
+
+    Critical rule:
+    - Only replace URLs that are derived directly from the WordPress plugin
+      response (LIVE_DIRECT_TO_GO_MAP), plus malformed internal /go/ URLs.
+    - Do not guess slugs from product names or domains.
+    """
     replacements = []
     replacement_map = LIVE_DIRECT_TO_GO_MAP or {}
 
@@ -104,18 +124,22 @@ def enforce_go_links(html: str, wp_base: str) -> tuple:
 
     def resolve_go_url(url: str):
         url_norm = canonicalise_candidate(url)
+
         if "/go/" in url_norm and url_norm.startswith(wp_base):
             m = re.search(r'/go/([a-z0-9-]+)', url_norm, flags=re.IGNORECASE)
             if m:
                 return f"{wp_base.rstrip('/')}/go/{m.group(1).lower()}"
             return None
+
         return replacement_map.get(url_norm)
 
     def replace_href(match):
         full_tag = match.group(0)
         href_val = match.group(1)
+
         if href_val.startswith(wp_base) and "/go/" not in href_val:
             return full_tag
+
         new_url = resolve_go_url(href_val)
         if new_url and new_url != href_val:
             replacements.append((href_val, new_url))
@@ -142,6 +166,10 @@ def enforce_go_links(html: str, wp_base: str) -> tuple:
     html = url_re.sub(replace_bare_url, html)
     return html, replacements
 
+
+# ============================================================
+#  💎  HIGH-CONVERSION MONEY PAGES
+# ============================================================
 HIGH_CONVERSION_TOPICS = [
     f"Best Free Bank Accounts in Germany for Expats {CURRENT_YEAR}: N26 vs C24",
     "N26 vs C24 Bank: Which Is Better for Expats in Germany?",
@@ -191,6 +219,10 @@ SEED_TOPICS = [
     "How to bring your family to Germany: family reunification visa guide",
 ]
 
+# ============================================================
+#  🔄  EXPONENTIAL BACKOFF WRAPPER
+# ============================================================
+
 def claude_with_retry(fn, *args, **kwargs):
     last_error = None
     for attempt in range(1, RETRY_MAX + 1):
@@ -213,6 +245,10 @@ def claude_with_retry(fn, *args, **kwargs):
             raise
     log.error(f"Claude API failed after {RETRY_MAX} attempts.")
     raise last_error
+
+# ============================================================
+#  💾  DISK CACHE
+# ============================================================
 
 def cache_key(topic: str) -> str:
     return hashlib.md5(topic.encode()).hexdigest()[:12]
@@ -238,6 +274,10 @@ def clear_cached_article(topic: str):
     if path.exists():
         path.unlink()
 
+# ============================================================
+#  🔧  AUTH & HTTP
+# ============================================================
+
 def build_headers():
     token = base64.b64encode(f"{WP_USER}:{WP_APP_PASS}".encode()).decode()
     return {"Authorization": f"Basic {token}", "Content-Type": "application/json"}
@@ -255,6 +295,10 @@ def wp_get_raw(endpoint, params=None):
     r = requests.get(f"{WP_URL}/wp-json/wp/v2/{endpoint}", headers=HEADERS, params=params or {}, timeout=30)
     r.raise_for_status()
     return r
+
+# ============================================================
+#  🔍  DUPLICATE DETECTION
+# ============================================================
 
 def fetch_all_post_data():
     posts, page = [], 1
@@ -289,6 +333,10 @@ def find_duplicate(topic, all_posts, sim_threshold=0.55, kw_threshold=0.60):
         if words_a and len(words_a & words_b) / len(words_a) >= kw_threshold:
             return True, post
     return False, None
+
+# ============================================================
+#  🗂️  MANUAL TOPIC QUEUE
+# ============================================================
 
 def load_manual_topics():
     if not MANUAL_TOPICS_FILE.exists():
@@ -336,6 +384,19 @@ def parse_manual_products(row):
     return [p.strip() for p in raw.split("|") if p.strip()]
 
 def normalize_publish_mode(language_value: str = "", skip_translate: bool = False) -> str:
+    """
+    Returns one of:
+      - "both"  -> publish EN + DE
+      - "en"    -> publish EN only
+      - "de"    -> publish DE only
+
+    Rules:
+    - CLI --skip-translate forces EN only
+    - CSV language values:
+        "" / "both" -> both
+        "en"        -> en
+        "de"        -> de
+    """
     if skip_translate:
         return "en"
     value = (language_value or "").strip().lower()
@@ -346,6 +407,10 @@ def normalize_publish_mode(language_value: str = "", skip_translate: bool = Fals
     if value == "both":
         return "both"
     return "both"
+
+# ============================================================
+#  🎯  TOPIC SELECTION
+# ============================================================
 
 def pick_fresh_topic(all_posts, custom_topic=None):
     if custom_topic:
@@ -395,6 +460,10 @@ def _generate_topics_api(existing_titles, count=20):
     raw = re.sub(r"```$", "", raw).strip()
     return json.loads(raw)
 
+# ============================================================
+#  🔗  REFERRAL LINK RESOLUTION
+# ============================================================
+
 def resolve_referral_links(topic: str, content_hint: str = "", forced_products=None) -> dict:
     fetch_referral_links(WP_URL, force=True)
     global LIVE_DIRECT_TO_GO_MAP
@@ -436,6 +505,10 @@ def resolve_referral_links(topic: str, content_hint: str = "", forced_products=N
     log.info(f"  Resolved {len(verified)} affiliate links ({list(verified.keys())[:5]}...)")
     return verified
 
+# ============================================================
+#  🎯  RANK MATH SEO SETTER
+# ============================================================
+
 def set_rank_math_seo(post_id: int, keyword: str, meta_title: str, meta_description: str) -> bool:
     payload = {"post_id": post_id, "keyword": keyword, "title": meta_title, "description": meta_description}
     try:
@@ -466,6 +539,10 @@ def set_rank_math_seo(post_id: int, keyword: str, meta_title: str, meta_descript
     log.warning(f"  Rank Math keyword NOT set — do manually: '{keyword}'")
     return False
 
+# ============================================================
+#  ✍️  ARTICLE GENERATION (EN)
+# ============================================================
+
 def generate_article_en(topic: str, rel_links: dict) -> dict:
     cached = load_cached_article(topic)
     if cached:
@@ -475,10 +552,16 @@ def generate_article_en(topic: str, rel_links: dict) -> dict:
     links_html = format_links_as_html(rel_links)
     cats_str = "\n".join(f"- {c}" for c in ALLOWED_CATEGORIES)
 
-    system = f'''You are an SEO writer for germanysupport.de (expat guide, Germany). Year: {CURRENT_YEAR}.
+    system = f"""You are an SEO writer for germanysupport.de (expat guide, Germany). Year: {CURRENT_YEAR}.
+
+LANGUAGE RULE:
+- Write EVERYTHING in English only.
+- Even if the provided topic is in German or any other language, the output must be fully in English.
+- The title, slug, meta_description, focus_keyword, tags, image_search_query, and article content must all be in English.
+- Do NOT output German.
 
 OUTPUT: Return ONLY a single-line minified JSON object. No markdown. No code blocks.
-All double-quotes inside HTML values must be escaped as \\".
+All double-quotes inside HTML values must be escaped as \\\".
 
 JSON schema (all fields required):
 {{"title":"string","slug":"string max 60 chars","meta_description":"string 150-155 chars","focus_keyword":"string","tags":["string"],"categories":["string"],"image_search_query":"string 2-4 words","content":"HTML string"}}
@@ -500,8 +583,9 @@ CATEGORIES (pick 1-2, exact names only):
 {cats_str}
 
 AFFILIATE LINKS (ALL must appear in content):
-{links_html}'''
-    user = f"Write a high-conversion SEO article for: {topic}"
+{links_html}"""
+
+    user = f"Write a high-conversion SEO article in English for this topic: {topic}"
 
     def _call():
         return client.messages.create(
@@ -531,6 +615,10 @@ AFFILIATE LINKS (ALL must appear in content):
     save_cached_article(topic, article)
     return article
 
+# ============================================================
+#  ✍️  ARTICLE TRANSLATION (DE)
+# ============================================================
+
 def generate_article_de(en_article: dict, rel_links: dict) -> dict:
     de_cache_key = f"DE_{en_article.get('slug', 'unknown')}"
     cached = load_cached_article(de_cache_key)
@@ -542,10 +630,16 @@ def generate_article_de(en_article: dict, rel_links: dict) -> dict:
     cats_str = "\n".join(f"- {c}" for c in ALLOWED_CATEGORIES)
     en_content = re.sub(r"<[^>]+>", " ", en_article.get("content", ""))[:4000]
 
-    system = f'''Du bist ein SEO-Texter für germanysupport.de. Jahr: {CURRENT_YEAR}.
+    system = f"""Du bist ein SEO-Texter für germanysupport.de. Jahr: {CURRENT_YEAR}.
+
+SPRACHREGEL:
+- Schreibe ALLES nur auf Deutsch.
+- Auch wenn der ursprüngliche Titel oder Inhalt auf Englisch oder in einer anderen Sprache ist, muss die Ausgabe vollständig auf Deutsch sein.
+- Titel, Slug, Meta-Beschreibung, Focus-Keyword, Tags und kompletter Content müssen auf Deutsch sein.
+- Gib keinen englischen Fließtext aus, außer bei Markennamen oder feststehenden Produktnamen.
 
 AUSGABE: Nur ein einzeiliges minimiertes JSON-Objekt. Kein Markdown.
-Alle Anführungszeichen in HTML müssen escaped sein: \\".
+Alle Anführungszeichen in HTML müssen escaped sein: \\\".
 
 JSON-Schema:
 {{"title":"string","slug":"string max 60","meta_description":"string 150-155 Zeichen","focus_keyword":"string","tags":["string"],"categories":["string"],"content":"HTML string"}}
@@ -564,7 +658,8 @@ KATEGORIEN (1-2, exakte Namen):
 {cats_str}
 
 AFFILIATE-LINKS (alle müssen im Content erscheinen):
-{links_html}'''
+{links_html}"""
+
     user = (f"Übersetze und optimiere für deutsche Expats:\n\n"
             f"TITEL: {en_article['title']}\n\n"
             f"INHALT:\n{en_content}")
@@ -590,6 +685,10 @@ AFFILIATE-LINKS (alle müssen im Content erscheinen):
 
     save_cached_article(de_cache_key, article)
     return article
+
+# ============================================================
+#  🧹  JSON PARSER
+# ============================================================
 
 def _parse_json_safe(raw: str, error_filename: str = "failed.txt") -> dict:
     text = raw.strip()
@@ -634,6 +733,10 @@ def _parse_json_safe(raw: str, error_filename: str = "failed.txt") -> dict:
         log.error(f"JSON repair failed. Raw saved to: {error_path}")
         raise
 
+# ============================================================
+#  🖼️  PEXELS IMAGE
+# ============================================================
+
 def fetch_pexels_image(query: str):
     hdrs = {"Authorization": PEXELS_KEY}
     params = {"query": query, "per_page": 5, "orientation": "landscape"}
@@ -663,6 +766,10 @@ def upload_image(img_bytes, slug, title, photographer):
     requests.post(f"{WP_URL}/wp-json/wp/v2/media/{mid}", headers=HEADERS,
                   json={"alt_text": title, "caption": f"Photo by {photographer} on Pexels"}, timeout=15)
     return mid
+
+# ============================================================
+#  📂  CATEGORIES & TAGS
+# ============================================================
 
 def fetch_wp_categories():
     cat_map, page = {}, 1
@@ -717,6 +824,10 @@ def sync_tags(names):
                 pass
     return ids
 
+# ============================================================
+#  🌐  POLYLANG: LINK EN ↔ DE
+# ============================================================
+
 def link_translations(en_id: int, de_id: int):
     try:
         r1 = requests.post(f"{WP_URL}/wp-json/wp/v2/posts/{en_id}", headers=HEADERS,
@@ -731,6 +842,10 @@ def link_translations(en_id: int, de_id: int):
     except Exception as e:
         log.warning(f"  Polylang link error: {e}")
         return False
+
+# ============================================================
+#  🚀  PUBLISH TO WORDPRESS
+# ============================================================
 
 def publish_post(article: dict, featured_id, cat_ids, tag_ids, photographer: str, lang: str = "en") -> dict:
     footer = (
@@ -750,6 +865,10 @@ def publish_post(article: dict, featured_id, cat_ids, tag_ids, photographer: str
         "lang": lang,
     }
     return wp_request("POST", "posts", json=payload)
+
+# ============================================================
+#  🚀  MAIN PIPELINE
+# ============================================================
 
 def main():
     parser = argparse.ArgumentParser(description="GermanySupport AutoBlogger")
