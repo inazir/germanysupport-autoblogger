@@ -3,7 +3,6 @@ set -a
 source "/home/u989113309/domains/germanysupport.de/repos/germanysupport-autoblogger/.env"
 set +a
 
-# If sourced, only load env and stop here
 if [ "${BASH_SOURCE[0]}" != "$0" ]; then
   return 0
 fi

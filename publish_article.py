@@ -38,10 +38,14 @@ import base64
 import logging
 import argparse
 import hashlib
+import socket
+import smtplib
+import traceback
 from typing import Optional
 from difflib import SequenceMatcher
 from datetime import datetime
 from pathlib import Path
+from email.message import EmailMessage
 
 import anthropic
 import requests
@@ -108,6 +112,14 @@ WP_APP_PASS   = os.environ["WP_APP_PASS"]
 ANTHROPIC_KEY = os.environ["ANTHROPIC_KEY"]
 PEXELS_KEY    = os.environ["PEXELS_KEY"]
 
+# SMTP settings for success/failure notifications.
+# Safe fallback defaults keep existing publishing logic unaffected if email envs are missing.
+SMTP_HOST     = os.getenv("SMTP_HOST", "smtp.hostinger.com")
+SMTP_PORT     = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER     = os.getenv("SMTP_USER")
+SMTP_PASS     = os.getenv("SMTP_PASS")
+ALERT_TO      = os.getenv("ALERT_TO")
+
 # ============================================================
 #  ⚙️  SETTINGS
 # ============================================================
@@ -115,6 +127,43 @@ CLAUDE_MODEL    = "claude-sonnet-4-20250514"
 MAX_TOKENS      = 6000
 RETRY_MAX       = 5
 RETRY_BASE_SECS = 10
+
+# ============================================================
+#  📧  EMAIL ALERTS
+# ============================================================
+
+def send_email(subject: str, body: str, to_email: Optional[str] = None) -> bool:
+    """
+    Send an email using Hostinger SMTP.
+    This is intentionally fail-safe: if SMTP env vars are missing or sending fails,
+    the publish pipeline continues exactly as before.
+    """
+    recipient = to_email or ALERT_TO
+
+    if not SMTP_USER or not SMTP_PASS or not recipient:
+        log.warning("Email skipped: SMTP_USER, SMTP_PASS, or ALERT_TO missing.")
+        return False
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = SMTP_USER
+    msg["To"] = recipient
+    msg["Reply-To"] = SMTP_USER
+    msg["X-Auto-Response-Suppress"] = "All"
+    msg.set_content(body)
+
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as smtp:
+            smtp.ehlo()
+            smtp.starttls()
+            smtp.ehlo()
+            smtp.login(SMTP_USER, SMTP_PASS)
+            smtp.send_message(msg)
+        log.info(f"Email sent successfully to {recipient}")
+        return True
+    except Exception as e:
+        log.error(f"Failed to send email: {e}")
+        return False
 
 # ============================================================
 #  🔒  DIRECT AFFILIATE URL → /go/ REPLACEMENT MAP
@@ -389,8 +438,6 @@ def find_duplicate(topic, all_posts, sim_threshold=0.50, kw_threshold=0.55):
 #  🌍  LANGUAGE DETECTION & TOPIC NORMALISATION
 # ============================================================
 
-# Common non-English words that reliably signal a German topic string.
-# Kept deliberately short — we only need a quick heuristic, not a full detector.
 _DE_SIGNAL_WORDS = {
     "für", "fuer", "und", "oder", "mit", "von", "bei", "das", "die", "der",
     "ein", "eine", "einen", "konto", "karten", "karte", "girokonto", "banken",
@@ -448,8 +495,6 @@ def translate_topic_to_english(topic: str) -> str:
 #  ✨  SEO DUPLICATE REWRITE
 # ============================================================
 
-# Intent modifier patterns — appended to produce fresh long-tail variants
-# while keeping the original search intent.
 SEO_INTENT_MODIFIERS = [
     f"Complete Guide {CURRENT_YEAR}",
     f"Step-by-Step Guide for Expats {CURRENT_YEAR}",
@@ -578,8 +623,6 @@ def resolve_manual_topic_with_dedup(
     )
 
     existing_titles = [p["title"]["rendered"] for p in all_posts]
-    # Use English base for rewrites so modifier patterns and AI produce
-    # clean English long-tail variants comparable to existing EN titles.
     rewrite_base = topic_for_dedup
 
     # --- Step 2: Rule-based rewrites (no API) ---
@@ -597,9 +640,6 @@ def resolve_manual_topic_with_dedup(
                 return candidate, True
 
     # --- Step 4: Skip safely (v4) ---
-    # Rationale: publishing the "least bad" duplicate risks keyword
-    # cannibalization and a Google duplicate-content penalty. It is safer
-    # to skip one cron run and let a human update the CSV manually.
     log.warning(
         f"  [REWRITE] All rewrite candidates still duplicate.\n"
         f"  Skipping '{original_topic}' — row will be marked 'skipped' for manual review."
@@ -668,7 +708,7 @@ def update_manual_topic_text(rows, idx, new_topic: str):
     """
     Overwrite the topic cell in a CSV row with the rewritten topic (v4).
     Called immediately after a successful rewrite, before publishing, so
-    the CSV always reflects the actual topic that was published.
+    the CSV always reflects what was actually published.
     """
     if idx is None or idx < 0 or idx >= len(rows):
         return
@@ -880,7 +920,7 @@ LANGUAGE RULE:
 - Do NOT output German.
 
 OUTPUT: Return ONLY a single-line minified JSON object. No markdown. No code blocks.
-All double-quotes inside HTML values must be escaped as \\\".
+All double-quotes inside HTML values must be escaped as \\".
 
 JSON schema (all fields required):
 {{"title":"string","slug":"string max 60 chars","meta_description":"string 150-155 chars","focus_keyword":"string","tags":["string"],"categories":["string"],"image_search_query":"string 2-4 words","content":"HTML string"}}
@@ -958,7 +998,7 @@ SPRACHREGEL:
 - Gib keinen englischen Fließtext aus, außer bei Markennamen oder feststehenden Produktnamen.
 
 AUSGABE: Nur ein einzeiliges minimiertes JSON-Objekt. Kein Markdown.
-Alle Anführungszeichen in HTML müssen escaped sein: \\\".
+Alle Anführungszeichen in HTML müssen escaped sein: \\".
 
 JSON-Schema:
 {{"title":"string","slug":"string max 60","meta_description":"string 150-155 Zeichen","focus_keyword":"string","tags":["string"],"categories":["string"],"content":"HTML string"}}
@@ -1226,7 +1266,6 @@ def main():
         raw_topic = (manual_row.get("topic") or "").strip()
         topic, was_rewritten = resolve_manual_topic_with_dedup(raw_topic, all_posts)
 
-        # v4: None means all rewrites were still duplicates — skip cleanly.
         if topic is None:
             if manual_rows and manual_idx is not None:
                 mark_manual_topic_skipped(manual_rows, manual_idx)
@@ -1240,8 +1279,6 @@ def main():
                 f"    Original : {raw_topic}\n"
                 f"    Final    : {topic}"
             )
-            # v4: Write the rewritten topic back into the CSV immediately so
-            # the file always reflects what was actually published.
             if manual_rows and manual_idx is not None:
                 update_manual_topic_text(manual_rows, manual_idx, topic)
                 log.info(f"  [CSV] Rewritten topic saved back to {MANUAL_TOPICS_FILE.name}")
@@ -1351,5 +1388,44 @@ def main():
     log.info(f"  Image    : {img_url}")
     log.info("=" * 62)
 
+    # Send a short success email at the very end, after all working logic has completed.
+    # This is non-blocking and does not affect publishing if SMTP has an issue.
+    success_lines = [
+        f"Time   : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"Host   : {socket.gethostname()}",
+        "",
+        "publish_article.py completed successfully.",
+        f"Topic  : {topic}",
+        f"Source : {source}",
+        f"Mode   : {publish_mode}",
+        f"Image  : {img_url}",
+    ]
+    if en_post:
+        success_lines.append(f"EN post : {en_post['link']}")
+    if de_post:
+        success_lines.append(f"DE post : {de_post['link']}")
+
+    send_email(
+        subject="Autoblogger success: publish_article.py",
+        body="\n".join(success_lines),
+    )
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        # Send a failure email for unhandled crashes, then re-raise so cron still gets a non-zero exit.
+        error_details = traceback.format_exc()
+        failure_body = "\n".join([
+            f"Time : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"Host : {socket.gethostname()}",
+            "",
+            "publish_article.py failed with an unhandled exception.",
+            "",
+            error_details,
+        ])
+        send_email(
+            subject="Autoblogger FAILED: publish_article.py",
+            body=failure_body,
+        )
+        raise
