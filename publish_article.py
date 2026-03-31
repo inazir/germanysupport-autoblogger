@@ -1,14 +1,24 @@
 """
-GermanySupport.de — AutoBlogger (Production v2)
+GermanySupport.de — AutoBlogger (Production v4)
 ================================================
-Fixes in this version:
-  1. Exponential backoff for Claude API overload errors
-  2. EN + DE published in single pipeline run
-  3. /go/* referral links always used (fixed slug normalisation)
-  4. Rank Math SEO set immediately after publish (70+ score)
-  5. Article JSON cached to disk — retries never regenerate content
-  6. Token-optimised prompts
-  7. Structured logging with timestamps
+Changes in v4 (hardening pass):
+  12. Rewritten manual topics are written back to manual_topics.csv immediately,
+      so the CSV always reflects the actual published topic.
+  13. Duplicate detection thresholds tightened conservatively:
+        sim_threshold  0.55 → 0.50  (title similarity)
+        kw_threshold   0.60 → 0.55  (keyword overlap)
+        slug ratio     0.85 → 0.80  (slug similarity)
+  14. Fallback when all rewrites are duplicates changed from "publish anyway"
+      to "mark row as skipped and exit cleanly" — safer, avoids cannibalization.
+  15. .env file auto-loaded from script directory if present (optional, no-op
+      if python-dotenv is not installed or file does not exist).
+
+Earlier changes (v3):
+  8.  Smart duplicate detection for manual CSV topics
+  9.  Auto-rewrite of duplicate topics into fresh SEO-friendly long-tail variants
+  10. Keyword-driven topic generation (SEO intent, long-tail, expat-focused)
+  11. AI-assisted candidate rewrites when first rewrite is still a duplicate
+  11b. Non-English (German) topics translated to EN before duplicate check
 
 Usage:
   python publish_article.py
@@ -35,6 +45,26 @@ from pathlib import Path
 
 import anthropic
 import requests
+
+# ============================================================
+#  🌱  .env AUTO-LOAD  (v4 — optional quality-of-life)
+#
+#  If a .env file exists next to this script, load it so the
+#  script can be run directly without pre-exporting vars in
+#  run_publish.sh.  This is a no-op when:
+#    - python-dotenv is not installed  (install: pip install python-dotenv)
+#    - no .env file exists beside the script
+#  The existing run_publish.sh workflow is fully unaffected because
+#  override=False means shell-exported variables always win.
+# ============================================================
+try:
+    from dotenv import load_dotenv
+    _env_path = Path(__file__).parent / ".env"
+    if _env_path.exists():
+        load_dotenv(dotenv_path=_env_path, override=False)  # shell env wins
+        print(f"[dotenv] Loaded environment from {_env_path}")
+except ImportError:
+    pass  # python-dotenv not installed — rely on shell environment as before
 
 from config import (
     CURRENT_YEAR,
@@ -319,20 +349,262 @@ def fetch_all_post_data():
         page += 1
     return posts
 
-def find_duplicate(topic, all_posts, sim_threshold=0.55, kw_threshold=0.60):
+
+def find_duplicate(topic, all_posts, sim_threshold=0.50, kw_threshold=0.55):
+    """
+    Returns (True, post) if topic is too similar to an existing published post,
+    or (False, None) if it is fresh enough to publish.
+
+    Thresholds (v4 — tightened conservatively vs v3):
+      slug_ratio     0.85 → 0.80   catches more slug-level near-duplicates
+      sim_threshold  0.55 → 0.50   catches slightly weaker title overlaps
+      kw_threshold   0.60 → 0.55   catches slightly weaker keyword overlaps
+
+    These are conservative adjustments: they reduce the chance of cannibalizing
+    an existing article without being so strict that the script can't find fresh
+    topics on a mid-size site.
+    """
     candidate_slug = re.sub(r'[^a-z0-9]+', '-', topic.lower())[:80].strip('-')
     for post in all_posts:
         existing_title = post["title"]["rendered"]
         existing_slug  = post.get("slug", "")
-        if candidate_slug and existing_slug and SequenceMatcher(None, candidate_slug, existing_slug).ratio() > 0.85:
+
+        # 1. Slug similarity (catches URL-level collisions)
+        if candidate_slug and existing_slug and SequenceMatcher(None, candidate_slug, existing_slug).ratio() > 0.80:
             return True, post
+
+        # 2. Full title string similarity
         if SequenceMatcher(None, topic.lower(), existing_title.lower()).ratio() >= sim_threshold:
             return True, post
+
+        # 3. Keyword overlap (4+ char words only, to filter stop-words)
         words_a = set(re.findall(r'\b\w{4,}\b', topic.lower()))
         words_b = set(re.findall(r'\b\w{4,}\b', existing_title.lower()))
         if words_a and len(words_a & words_b) / len(words_a) >= kw_threshold:
             return True, post
+
     return False, None
+
+# ============================================================
+#  🌍  LANGUAGE DETECTION & TOPIC NORMALISATION
+# ============================================================
+
+# Common non-English words that reliably signal a German topic string.
+# Kept deliberately short — we only need a quick heuristic, not a full detector.
+_DE_SIGNAL_WORDS = {
+    "für", "fuer", "und", "oder", "mit", "von", "bei", "das", "die", "der",
+    "ein", "eine", "einen", "konto", "karten", "karte", "girokonto", "banken",
+    "bestes", "beste", "bester", "günstig", "günstigste", "deutschland",
+    "ausländer", "studenten", "anfänger", "vergleich", "kosten", "schritt",
+    "anleitung", "leitfaden", "überblick", "versicherung", "steuer",
+}
+
+def _is_likely_non_english(text: str) -> bool:
+    """
+    Return True when the topic string appears to be written in a language
+    other than English.  Uses a simple word-overlap heuristic against a
+    short German signal-word list — cheap, no API call needed.
+    """
+    words = set(re.findall(r'\b\w+\b', text.lower()))
+    return bool(words & _DE_SIGNAL_WORDS)
+
+
+def translate_topic_to_english(topic: str) -> str:
+    """
+    Translate a non-English topic string to English using a minimal Claude call.
+    Used only for duplicate-detection purposes — the original topic string is
+    still passed to the article generator (which handles language via its own
+    system prompt).
+
+    Returns the English translation, or the original string on any failure.
+    """
+    client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+
+    def _call():
+        return client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=100,
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"Translate the following article topic to English. "
+                    f"Return ONLY the translated topic string, nothing else:\n\n{topic}"
+                ),
+            }],
+        )
+
+    try:
+        log.info(f"  Translating non-English topic for duplicate check: {topic}")
+        r = claude_with_retry(_call)
+        translated = r.content[0].text.strip().strip('"').strip("'")
+        log.info(f"  Translated topic (EN, for dedup only): {translated}")
+        return translated
+    except Exception as e:
+        log.warning(f"  Topic translation failed ({e}); using original for dedup.")
+        return topic
+
+
+# ============================================================
+#  ✨  SEO DUPLICATE REWRITE
+# ============================================================
+
+# Intent modifier patterns — appended to produce fresh long-tail variants
+# while keeping the original search intent.
+SEO_INTENT_MODIFIERS = [
+    f"Complete Guide {CURRENT_YEAR}",
+    f"Step-by-Step Guide for Expats {CURRENT_YEAR}",
+    "Requirements and Costs Explained",
+    "Costs, Fees and Hidden Charges",
+    f"Best Options for Expats {CURRENT_YEAR}",
+    "for Students and Foreigners",
+    "for Beginners in Germany",
+    "Comparison: Which Is Best?",
+    "Pros, Cons and Alternatives",
+    f"Top Picks {CURRENT_YEAR}: Tested and Compared",
+    "What You Need to Know Before You Start",
+    "Common Mistakes to Avoid",
+    "Tips to Save Money in Germany",
+    f"Updated {CURRENT_YEAR}: Everything You Need",
+]
+
+def _strip_year(text: str) -> str:
+    """Remove a trailing 4-digit year (e.g. 2024, 2025, 2026) from a topic string."""
+    return re.sub(r'\b20\d{2}\b', '', text).strip(' :–-')
+
+
+def rewrite_duplicate_topic_simple(original_topic: str) -> list[str]:
+    """
+    Produce rule-based rewrites by stripping any existing year and appending
+    SEO intent modifiers.  Cheap (no API call), tried first.
+    Returns candidate strings in priority order.
+    """
+    base = _strip_year(original_topic)
+    base = re.sub(
+        r'\s*[:\-–]\s*(guide|comparison|review|requirements|costs?|tips?|explained).*$',
+        '', base, flags=re.IGNORECASE
+    ).strip()
+    return [f"{base}: {modifier}" for modifier in SEO_INTENT_MODIFIERS]
+
+
+def rewrite_duplicate_topic_ai(original_topic: str, existing_titles: list[str], count: int = 8) -> list[str]:
+    """
+    Ask Claude for SEO-friendly long-tail rewrites of a duplicate topic.
+    Used as fallback after rule-based rewrites are exhausted.
+    Returns a list of candidate topic strings.
+    """
+    client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+    existing_str = "\n".join(f"- {t}" for t in existing_titles[:60])
+
+    prompt = (
+        f"You are an SEO strategist for germanysupport.de, a German expat guide.\n"
+        f"The following topic is already published and must NOT be duplicated:\n"
+        f"  \"{original_topic}\"\n\n"
+        f"These topics already exist on the site (do NOT create anything similar):\n"
+        f"{existing_str}\n\n"
+        f"Generate {count} NEW long-tail SEO topic variants that:\n"
+        f"- Keep the same core search intent as the original topic\n"
+        f"- Are useful for expats, foreigners, or students in Germany\n"
+        f"- Use proven SEO patterns such as:\n"
+        f"    'how to … in Germany for expats'\n"
+        f"    'best … in Germany {CURRENT_YEAR}'\n"
+        f"    '… requirements in Germany'\n"
+        f"    '… costs in Germany'\n"
+        f"    '… comparison Germany'\n"
+        f"    '… for students / foreigners / beginners'\n"
+        f"- Are specific enough to rank without cannibalizing existing content\n"
+        f"- Include the year {CURRENT_YEAR} where it adds SEO value\n\n"
+        f"Output ONLY a JSON array of {count} topic strings. No markdown, no explanation."
+    )
+
+    def _call():
+        return client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=600,
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+    log.info("  Calling Claude API for AI duplicate rewrites...")
+    r = claude_with_retry(_call)
+    raw = r.content[0].text.strip()
+    raw = re.sub(r"^```json\s*", "", raw)
+    raw = re.sub(r"```$", "", raw).strip()
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        log.warning("  AI rewrite response was not valid JSON; falling back to empty list.")
+        return []
+
+
+def resolve_manual_topic_with_dedup(
+    original_topic: str,
+    all_posts: list,
+    max_ai_attempts: int = 2,
+) -> tuple[str, bool]:
+    """
+    Smart duplicate handling for a manual CSV topic.
+
+    Strategy (in order):
+      1. No duplicate found → use as-is.
+      2. Rule-based SEO rewrites (no API cost) → first non-duplicate wins.
+      3. AI rewrites (up to max_ai_attempts × 8 candidates).
+      4. All candidates still duplicates → return (None, True).
+         Caller marks the row "skipped" for manual review instead of
+         force-publishing a weak candidate (v4 safer fallback).
+
+    Non-English topics: translated to English internally before dedup;
+    the original string is preserved for article generation.
+
+    Returns:
+      (final_topic, was_rewritten)
+        final_topic=None means "no safe topic found — skip this row"
+    """
+    topic_for_dedup = (
+        translate_topic_to_english(original_topic)
+        if _is_likely_non_english(original_topic)
+        else original_topic
+    )
+
+    is_dup, match = find_duplicate(topic_for_dedup, all_posts)
+
+    if not is_dup:
+        return original_topic, False  # clean — publish as written
+
+    matched_title = match["title"]["rendered"] if match else "unknown"
+    log.warning(
+        f"  [DUPLICATE] Manual topic conflicts with existing post:\n"
+        f"    Original : {original_topic}\n"
+        f"    Conflicts: {matched_title}\n"
+        f"  → Attempting smart rewrite..."
+    )
+
+    existing_titles = [p["title"]["rendered"] for p in all_posts]
+    # Use English base for rewrites so modifier patterns and AI produce
+    # clean English long-tail variants comparable to existing EN titles.
+    rewrite_base = topic_for_dedup
+
+    # --- Step 2: Rule-based rewrites (no API) ---
+    for candidate in rewrite_duplicate_topic_simple(rewrite_base):
+        if not find_duplicate(candidate, all_posts)[0]:
+            log.info(f"  [REWRITE] Rule-based rewrite chosen: {candidate}")
+            return candidate, True
+
+    # --- Step 3: AI rewrites ---
+    for attempt in range(1, max_ai_attempts + 1):
+        log.info(f"  [REWRITE] AI rewrite attempt {attempt}/{max_ai_attempts}...")
+        for candidate in rewrite_duplicate_topic_ai(rewrite_base, existing_titles, count=8):
+            if not find_duplicate(candidate, all_posts)[0]:
+                log.info(f"  [REWRITE] AI rewrite chosen (attempt {attempt}): {candidate}")
+                return candidate, True
+
+    # --- Step 4: Skip safely (v4) ---
+    # Rationale: publishing the "least bad" duplicate risks keyword
+    # cannibalization and a Google duplicate-content penalty. It is safer
+    # to skip one cron run and let a human update the CSV manually.
+    log.warning(
+        f"  [REWRITE] All rewrite candidates still duplicate.\n"
+        f"  Skipping '{original_topic}' — row will be marked 'skipped' for manual review."
+    )
+    return None, True  # None = skip this topic
 
 # ============================================================
 #  🗂️  MANUAL TOPIC QUEUE
@@ -374,9 +646,33 @@ def get_next_manual_topic():
     return None, None, rows
 
 def mark_manual_topic_done(rows, idx):
+    """Mark a CSV row as done and persist to disk."""
     if idx is None or idx < 0 or idx >= len(rows):
         return
     rows[idx]["status"] = "done"
+    save_manual_topics(rows)
+
+def mark_manual_topic_skipped(rows, idx):
+    """
+    Mark a CSV row as 'skipped' (v4).
+    Used when all rewrite attempts produce duplicate candidates.
+    The row stays in the CSV so a human can update the topic and re-queue it
+    by changing the status back to 'pending'.
+    """
+    if idx is None or idx < 0 or idx >= len(rows):
+        return
+    rows[idx]["status"] = "skipped"
+    save_manual_topics(rows)
+
+def update_manual_topic_text(rows, idx, new_topic: str):
+    """
+    Overwrite the topic cell in a CSV row with the rewritten topic (v4).
+    Called immediately after a successful rewrite, before publishing, so
+    the CSV always reflects the actual topic that was published.
+    """
+    if idx is None or idx < 0 or idx >= len(rows):
+        return
+    rows[idx]["topic"] = new_topic
     save_manual_topics(rows)
 
 def parse_manual_products(row):
@@ -426,7 +722,7 @@ def pick_fresh_topic(all_posts, custom_topic=None):
         if not find_duplicate(topic, all_posts)[0]:
             return topic, source
 
-    log.info("Generating AI topics...")
+    log.info("Generating AI topics (SEO-intent, keyword-driven)...")
     existing = [p["title"]["rendered"] for p in all_posts[:80]]
     for attempt in range(1, 6):
         log.info(f"  AI generation attempt {attempt}/5...")
@@ -439,19 +735,42 @@ def pick_fresh_topic(all_posts, custom_topic=None):
     log.error("No fresh topics found.")
     sys.exit(1)
 
+
 def _generate_topics_api(existing_titles, count=20):
+    """
+    Generate SEO-driven long-tail topic ideas for expats in Germany.
+    Prompts Claude to favour clear search intent, long-tail structure,
+    and ranking potential — not just generic article ideas.
+    """
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
     existing_str = "\n".join(f"- {t}" for t in existing_titles)
+
+    prompt = (
+        f"You are an SEO strategist for germanysupport.de, a guide for expats in Germany.\n"
+        f"Generate {count} NEW article topics that:\n"
+        f"- Have clear search intent (informational or commercial investigation)\n"
+        f"- Use long-tail keyword structures with high ranking potential\n"
+        f"- Are useful for expats, foreigners, or students living in Germany\n"
+        f"- Relate to practical topics: banking, insurance, taxes, housing, visas, mobile, internet, investing\n"
+        f"- Favour patterns such as:\n"
+        f"    'how to … in Germany for expats'\n"
+        f"    'best … in Germany {CURRENT_YEAR}'\n"
+        f"    '… requirements in Germany'\n"
+        f"    '… costs in Germany'\n"
+        f"    '… comparison Germany'\n"
+        f"    '… for students / foreigners / beginners'\n"
+        f"- Include {CURRENT_YEAR} in the title where it adds SEO value\n"
+        f"- Are specific enough to avoid cannibalizing existing content\n\n"
+        f"Do NOT generate anything similar to these already-published titles:\n"
+        f"{existing_str}\n\n"
+        f"Output ONLY a JSON array of {count} topic strings. No markdown, no explanation."
+    )
 
     def _call():
         return client.messages.create(
             model=CLAUDE_MODEL,
             max_tokens=800,
-            messages=[{"role": "user", "content": (
-                f"Generate {count} NEW article topics for expats in Germany. "
-                f"High-demand, low-competition. NOT similar to:\n{existing_str}\n"
-                f"Output ONLY a JSON array of {count} strings. No markdown."
-            )}]
+            messages=[{"role": "user", "content": prompt}],
         )
 
     r   = claude_with_retry(_call)
@@ -902,14 +1221,39 @@ def main():
 
     if args.topic:
         topic, source = pick_fresh_topic(all_posts, args.topic)
+
     elif manual_row:
-        topic = (manual_row.get("topic") or "").strip()
+        raw_topic = (manual_row.get("topic") or "").strip()
+        topic, was_rewritten = resolve_manual_topic_with_dedup(raw_topic, all_posts)
+
+        # v4: None means all rewrites were still duplicates — skip cleanly.
+        if topic is None:
+            if manual_rows and manual_idx is not None:
+                mark_manual_topic_skipped(manual_rows, manual_idx)
+                log.info(f"  [CSV] Row marked 'skipped' in {MANUAL_TOPICS_FILE.name}")
+            log.warning("  Exiting without publishing — update the topic in the CSV and re-queue.")
+            return
+
+        if was_rewritten:
+            log.info(
+                f"  [REWRITE] Manual topic rewritten to avoid duplication:\n"
+                f"    Original : {raw_topic}\n"
+                f"    Final    : {topic}"
+            )
+            # v4: Write the rewritten topic back into the CSV immediately so
+            # the file always reflects what was actually published.
+            if manual_rows and manual_idx is not None:
+                update_manual_topic_text(manual_rows, manual_idx, topic)
+                log.info(f"  [CSV] Rewritten topic saved back to {MANUAL_TOPICS_FILE.name}")
+
         source = "manual"
         row_lang = (manual_row.get("language") or "").strip().lower()
         publish_mode = normalize_publish_mode(language_value=row_lang, skip_translate=False)
+
     elif args.manual_only:
         log.info("    No pending manual topics found.")
         return
+
     else:
         topic, source = pick_fresh_topic(all_posts, None)
 
