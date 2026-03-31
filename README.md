@@ -1,6 +1,12 @@
 # 🚀 GermanySupport.de Autoblogger System
 
-Fully automated AI-based article publishing + SEO optimization system for WordPress.
+Fully automated AI-powered article publishing + SEO optimization system for WordPress.
+
+Designed for:
+- Expats in Germany content
+- Affiliate monetization (/go links only)
+- Hands-off automation via cron
+- Mobile control via GitHub
 
 ---
 
@@ -10,22 +16,27 @@ germanysupport-autoblogger/
 
 ├── publish_article.py  
 ├── optimize_articles.py  
+├── translate_articles.py  
+├── update_links.py  
 ├── config.py  
 ├── run_publish.sh  
 ├── run_optimize.sh  
+├── run_translate.sh  
+├── run_update_links.sh  
+├── run_git_sync.sh  
 ├── manual_topics.csv  
-├── .env  
-├── logs/  
-├── cache/  
-└── .github/workflows/  
+├── .env (NOT in git)  
+├── logs/ (auto-created)  
+├── cache/ (auto-created)  
+└── .github/  
 
 ---
 
 # 🔐 `.env` Setup (MANDATORY)
 
-## Location
-Place `.env` in repo root:
+⚠️ The system WILL FAIL if `.env` is missing.
 
+## Location
 germanysupport-autoblogger/.env
 
 ## Example
@@ -37,33 +48,56 @@ WP_APP_PASS=your_wp_application_password
 ANTHROPIC_KEY=your_claude_api_key  
 PEXELS_KEY=your_pexels_api_key  
 
+SMTP_HOST=smtp.hostinger.com  
+SMTP_PORT=587  
+SMTP_USER=info@germanysupport.de  
+SMTP_PASS=your_email_password  
+ALERT_TO=your@email.com  
+
 ---
 
 # ⚙️ System Architecture
 
-Publishing Flow:
-run_publish.sh → publish_article.py → generate → enforce links → publish → translate → SEO
+## Publishing Flow
 
-Optimization Flow:
-run_optimize.sh → optimize_articles.py → improve SEO → update WP
+run_publish.sh  
+→ pre-sync  
+→ publish_article.py  
+→ generate → links → publish → translate → SEO → email  
+→ post-sync  
+
+## Optimization Flow
+
+run_optimize.sh  
+→ optimize_articles.py  
+→ improve SEO  
 
 ---
 
 # 📜 run_publish.sh
 
+## Features
+
+- Loads `.env` (mandatory)  
+- Creates logs/ and cache/ automatically  
+- Git sync before and after publish  
+- Logs execution  
+- Returns correct exit codes  
+
+## Usage
+
 bash run_publish.sh  
 bash run_publish.sh --topic "Best car insurance in Germany"  
-bash run_publish.sh --topic "..." --skip-translate  
-
-source run_publish.sh → loads env only
+bash run_publish.sh --skip-translate  
 
 ---
 
-# 📜 run_optimize.sh
+# 📜 run_git_sync.sh
 
-bash run_optimize.sh  
-bash run_optimize.sh --days 1  
-bash run_optimize.sh --limit 5  
+- Syncs ONLY manual_topics.csv  
+- Pulls latest changes  
+- Commits local CSV changes  
+- Pushes back to GitHub  
 
 ---
 
@@ -73,6 +107,7 @@ topic,products,language,status
 
 pending → publish  
 done → skip  
+skipped → needs fix  
 
 Processes ONE topic per run.
 
@@ -84,58 +119,33 @@ Always uses:
 
 https://germanysupport.de/go/{slug}
 
-Never raw affiliate links.
+---
+
+# 📧 Email Alerts
+
+- Success email after publish  
+- Failure email on crash  
 
 ---
 
-# ⏰ Cron Setup
+# ⏰ Cron
 
-Git pull:
-cd repo && git pull
-
-Publish:
-bash run_publish.sh
-
-Optimize:
-bash run_optimize.sh --days 1
-
----
-
-# 📱 Mobile Workflow
-
-Edit manual_topics.csv in GitHub → commit → cron publishes
-
----
-
-# 💻 Manual Run
-
-set -a  
-source .env  
-set +a  
-
-python3 publish_article.py --topic "..."  
-python3 optimize_articles.py --days 1  
-
----
-
-# 🔄 Git Sync
-
-manual_topics.csv auto-committed + pushed after publish
+bash run_publish.sh  
+bash run_optimize.sh --days 1  
 
 ---
 
 # 🧪 Debug
 
 tail -f logs/cron.log  
-
-grep -R "py.pl" .  
-grep -R "referral-link" .  
+tail -f logs/git_sync.log  
 
 ---
 
 # ⚡ Summary
 
-- Fully automated publishing  
+- Fully automated  
 - SEO optimized  
-- Mobile controllable  
-- Uses internal /go links only  
+- Email monitored  
+- GitHub controlled  
+- Safe sync (CSV only)  
