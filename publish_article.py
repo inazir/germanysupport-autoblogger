@@ -898,6 +898,132 @@ def set_rank_math_seo(post_id: int, keyword: str, meta_title: str, meta_descript
     log.warning(f"  Rank Math keyword NOT set — do manually: '{keyword}'")
     return False
 
+
+# ============================================================
+#  🛠️  SEO NORMALISER (minimal hardening)
+#
+#  Why this was added:
+#  Rank Math scores were inconsistent because Claude sometimes returns
+#  SEO fields that are structurally valid JSON but weak for Rank Math's
+#  checklist-based tests (keyword missing in title/slug/meta/intro/H2).
+#
+#  This helper makes only the minimum safe adjustments before publish.
+#  It does NOT change the rest of the publishing pipeline.
+# ============================================================
+
+def _strip_html_tags(text: str) -> str:
+    return re.sub(r"<[^>]+>", " ", text or "").strip()
+
+def _collapse_spaces(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "")).strip()
+
+def _make_slug(text: str, max_len: int = 60) -> str:
+    # Keep existing behavior simple and deterministic. ASCII-only slug is fine
+    # for EN and DE in WordPress and improves exact keyword matching.
+    text = (text or "").lower()
+    text = re.sub(r"[äàáâãå]", "a", text)
+    text = re.sub(r"[öòóôõ]", "o", text)
+    text = re.sub(r"[üùúû]", "u", text)
+    text = re.sub(r"[ß]", "ss", text)
+    text = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
+    text = re.sub(r"-{2,}", "-", text)
+    return text[:max_len].strip("-")
+
+def _trim_meta_description(text: str, min_len: int = 150, max_len: int = 155) -> str:
+    text = _collapse_spaces(text)
+    if len(text) <= max_len and len(text) >= min_len:
+        return text
+    if len(text) > max_len:
+        cut = text[:max_len].rstrip(" ,;:-")
+        if " " in cut:
+            cut = cut.rsplit(" ", 1)[0]
+        return cut[:max_len].rstrip(" ,;:-.")
+    return text[:max_len]
+
+def _first_nonempty(*values) -> str:
+    for v in values:
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+
+def _ensure_keyword_in_intro(content: str, keyword: str) -> str:
+    if not content or not keyword:
+        return content
+    if re.search(re.escape(keyword), content[:1200], flags=re.IGNORECASE):
+        return content
+
+    intro = f"<p><strong>{html_lib.escape(keyword)}</strong> is one of the most searched topics for expats in Germany. This guide explains the key facts, costs, options and practical steps you should know.</p>"
+    # Insert intro before first heading if possible, else prepend.
+    h_match = re.search(r"<h[1-6][^>]*>", content, flags=re.IGNORECASE)
+    if h_match:
+        return content[:h_match.start()] + intro + content[h_match.start():]
+    return intro + content
+
+def _ensure_keyword_in_h2(content: str, keyword: str) -> str:
+    if not content or not keyword:
+        return content
+    if re.search(rf"<h2[^>]*>.*?{re.escape(keyword)}.*?</h2>", content, flags=re.IGNORECASE | re.DOTALL):
+        return content
+
+    # Minimal change: update the first H2 only if none contains the keyword.
+    def repl(match):
+        inner = re.sub(r"<[^>]+>", "", match.group(1)).strip()
+        new_inner = f"{html_lib.escape(keyword)}: {inner}" if inner else html_lib.escape(keyword)
+        return f"<h2>{new_inner}</h2>"
+
+    return re.sub(r"<h2[^>]*>(.*?)</h2>", repl, content, count=1, flags=re.IGNORECASE | re.DOTALL)
+
+def normalize_article_seo(article: dict, topic: str, lang: str = "en") -> dict:
+    """
+    Minimal SEO hardening layer applied after Claude returns JSON.
+
+    Guarantees, as far as possible without rewriting the whole article:
+    - focus keyword exists
+    - keyword appears in title
+    - slug contains the keyword
+    - meta description contains the keyword
+    - keyword appears near the beginning of content
+    - at least one H2 contains the keyword
+    """
+    article = dict(article or {})
+
+    original_title = _first_nonempty(article.get("title"), topic, "Germany Guide")
+    original_keyword = _first_nonempty(article.get("focus_keyword"), topic, original_title)
+
+    # Keep the keyword concise and Rank-Math-friendly.
+    keyword = _collapse_spaces(re.sub(r"[|:–-]\s*(guide|review|comparison|explained|requirements|costs?)\b.*$", "", original_keyword, flags=re.IGNORECASE))
+    keyword = keyword[:65].strip(" -:|")
+    if not keyword:
+        keyword = _collapse_spaces(topic)[:65]
+
+    title = original_title
+    if keyword and keyword.lower() not in title.lower():
+        # Minimal / safe: prepend keyword instead of fully rewriting Claude's title.
+        title = f"{keyword}: {title}"
+
+    slug_source = _first_nonempty(article.get("slug"), keyword, title)
+    # Prefer exact keyword in slug because Rank Math checks this explicitly.
+    slug = _make_slug(keyword or slug_source, max_len=60) or _make_slug(slug_source, max_len=60)
+
+    meta = _first_nonempty(article.get("meta_description"))
+    if not meta or keyword.lower() not in meta.lower():
+        if lang == "de":
+            meta = f"{keyword} in Deutschland: verständlicher Guide für Expats mit Kosten, Voraussetzungen, Tipps und den besten Optionen."
+        else:
+            meta = f"{keyword} in Germany explained for expats: costs, requirements, best options, practical tips and what to do step by step."
+    meta = _trim_meta_description(meta)
+
+    content = article.get("content", "")
+    content = _ensure_keyword_in_intro(content, keyword)
+    content = _ensure_keyword_in_h2(content, keyword)
+
+    article["title"] = title
+    article["focus_keyword"] = keyword
+    article["slug"] = slug
+    article["meta_description"] = meta
+    article["content"] = content
+    return article
+
 # ============================================================
 #  ✍️  ARTICLE GENERATION (EN)
 # ============================================================
@@ -971,6 +1097,9 @@ AFFILIATE LINKS (ALL must appear in content):
                 log.info(f"    {old[:60]} → {new}")
         article["content"] = cleaned
 
+    # Minimal SEO hardening for Rank Math consistency.
+    article = normalize_article_seo(article, topic, lang="en")
+
     save_cached_article(topic, article)
     return article
 
@@ -1041,6 +1170,9 @@ AFFILIATE-LINKS (alle müssen im Content erscheinen):
         if swaps:
             log.info(f"  Enforced /go/ links (DE): replaced {len(swaps)} direct URL(s)")
         article["content"] = cleaned
+
+    # Minimal SEO hardening for Rank Math consistency.
+    article = normalize_article_seo(article, article.get("title") or en_article.get("title", ""), lang="de")
 
     save_cached_article(de_cache_key, article)
     return article
