@@ -23,9 +23,16 @@ python -m deals_engine.deals.runner
 
 ```env
 WP_URL="https://germanysupport.de"
-WP_USER="your-wordpress-username"
-WP_APP_PASS="your-wordpress-application-password"
-
+WP_USER="brownguygermany@gmail.com"
+WP_APP_PASS=""
+ANTHROPIC_KEY=""
+DEALS_TRANSLATION_MODEL="claude-haiku-4-5"
+PEXELS_KEY=""
+SMTP_HOST="smtp.hostinger.com"
+SMTP_PORT=587
+SMTP_USER="info@germanysupport.de"
+SMTP_PASS=
+ALERT_TO="brownguygermany@gmail.com"
 DEALS_CATEGORY_SLUG="best-deals"
 DEALS_DEFAULT_STATUS="draft"
 DEALS_LANGUAGE_MODE="both"
