@@ -25,16 +25,25 @@ def get_platform_publisher(target: SocialTarget):
     raise PlatformError(f"Unsupported platform '{target.platform}' for target '{target.key}'")
 
 
-def _prepare_generated_image(post: SocialPost, target: SocialTarget) -> None:
-    if not post.generate_image:
+def _build_generated_image_public_url(output_path: str | os.PathLike[str]) -> str | None:
+    public_base = os.getenv("SOCIAL_GENERATED_IMAGE_PUBLIC_BASE_URL", "").strip().rstrip("/")
+    if not public_base:
+        return None
+
+    output_path_obj = Path(output_path)
+    file_name = output_path_obj.name
+    parent_name = output_path_obj.parent.name
+
+    if parent_name == "generated_images":
+        return f"{public_base}/generated_images/{file_name}"
+
+    return f"{public_base}/{file_name}"
+
+
+def _ensure_background_image(post: SocialPost, target: SocialTarget) -> None:
+    if getattr(post, "background_image_path", None):
         return
 
-    if post.generated_image_path and Path(post.generated_image_path).exists():
-        if getattr(post, "generated_image_public_url", None) and not getattr(post, "image_url", None):
-            post.image_url = post.generated_image_public_url
-        return
-
-    # Try Pexels first as free visual background enrichment.
     try:
         bg = fetch_pexels_background(
             external_id=post.external_id,
@@ -52,31 +61,63 @@ def _prepare_generated_image(post: SocialPost, target: SocialTarget) -> None:
     except Exception as exc:
         print(f"WARNING: Pexels background fetch failed: {exc}")
 
+
+def _prepare_generated_image(post: SocialPost, target: SocialTarget) -> None:
+    if not post.generate_image:
+        return
+
     brand_text = os.getenv("SOCIAL_BRAND_TEXT", "GermanySupport")
-    public_base = os.getenv("SOCIAL_GENERATED_IMAGE_PUBLIC_BASE_URL", "").rstrip("/")
 
-    output_path = generate_branded_image(
-        post=post,
-        brand_text=brand_text,
-        filename_prefix=target.key,
+    _ensure_background_image(post, target)
+
+    # Feed image
+    existing_path = (getattr(post, "generated_image_path", None) or "").strip()
+    if existing_path and Path(existing_path).exists():
+        if not getattr(post, "generated_image_public_url", None):
+            post.generated_image_public_url = _build_generated_image_public_url(existing_path)
+    else:
+        output_path = generate_branded_image(
+            post=post,
+            brand_text=brand_text,
+            filename_prefix=target.key,
+            cta_text="Check the first comment for the exact link",
+        )
+        post.generated_image_path = output_path
+        post.generated_image_public_url = _build_generated_image_public_url(output_path)
+
+    if getattr(post, "generated_image_public_url", None):
+        post.image_url = post.generated_image_public_url
+
+    # Story image
+    if getattr(target, "publish_story", False):
+        story_path = (getattr(post, "story_generated_image_path", None) or "").strip()
+        if story_path and Path(story_path).exists():
+            if not getattr(post, "story_generated_image_public_url", None):
+                post.story_generated_image_public_url = _build_generated_image_public_url(story_path)
+        else:
+            story_output_path = generate_branded_image(
+                post=post,
+                brand_text=brand_text,
+                filename_prefix=f"{target.key}_story",
+                cta_text="Read full guide on GermanySupport.de",
+            )
+            post.story_generated_image_path = story_output_path
+            post.story_generated_image_public_url = _build_generated_image_public_url(story_output_path)
+
+    print(
+        "DEBUG GENERATED IMAGE",
+        {
+            "target": target.key,
+            "generated_image_path": getattr(post, "generated_image_path", None),
+            "generated_image_public_url": getattr(post, "generated_image_public_url", None),
+            "story_generated_image_path": getattr(post, "story_generated_image_path", None),
+            "story_generated_image_public_url": getattr(post, "story_generated_image_public_url", None),
+            "image_url": getattr(post, "image_url", None),
+        },
     )
-    post.generated_image_path = output_path
-
-    if public_base:
-        file_name = Path(output_path).name
-        public_url = f"{public_base}/{file_name}"
-        post.generated_image_public_url = public_url
-
-        # Important: Instagram needs a public URL, and Facebook may also use it.
-        if not getattr(post, "image_url", None):
-            post.image_url = public_url
 
 
 def _normalize_publish_result(publish_result):
-    """
-    Normalize platform publisher outputs so the rest of the pipeline
-    can work even if a platform still returns a plain string or dict.
-    """
     if isinstance(publish_result, str):
         return SimpleNamespace(
             remote_post_id=publish_result,
@@ -107,6 +148,40 @@ def _normalize_publish_result(publish_result):
     raise PlatformError(
         f"Unsupported publish result type from platform publisher: {type(publish_result).__name__}"
     )
+
+
+def _publish_story_if_enabled(post: SocialPost, target: SocialTarget, publisher) -> str | None:
+    if not getattr(target, "publish_story", False):
+        return None
+
+    image_path = (
+        getattr(post, "story_generated_image_path", None)
+        or getattr(post, "generated_image_path", None)
+        or ""
+    ).strip() or None
+    image_url = (
+        getattr(post, "story_generated_image_public_url", None)
+        or getattr(post, "generated_image_public_url", None)
+        or getattr(post, "image_url", None)
+        or ""
+    ).strip() or None
+
+    print(
+        "DEBUG STORY PAYLOAD",
+        {
+            "target": target.key,
+            "platform": target.platform,
+            "image_path": image_path,
+            "image_url": image_url,
+        },
+    )
+
+    if target.platform == "instagram" and not image_url:
+        raise PlatformError(
+            f"Instagram story target '{target.key}' requires SOCIAL_GENERATED_IMAGE_PUBLIC_BASE_URL or another public image_url"
+        )
+
+    return publisher.publish_story(post, image_path=image_path, image_url=image_url)
 
 
 def publish_to_targets(
@@ -168,9 +243,12 @@ def publish_to_targets(
                         "reason": "dry_run",
                         "generated_image_path": getattr(post, "generated_image_path", None),
                         "generated_image_public_url": getattr(post, "generated_image_public_url", None),
+                        "story_generated_image_path": getattr(post, "story_generated_image_path", None),
+                        "story_generated_image_public_url": getattr(post, "story_generated_image_public_url", None),
                         "image_url": getattr(post, "image_url", None),
                         "background_image_path": getattr(post, "background_image_path", None),
                         "background_image_photographer": getattr(post, "background_image_photographer", None),
+                        "story_enabled": bool(getattr(target, "publish_story", False)),
                     }
                 )
                 continue
@@ -178,6 +256,18 @@ def publish_to_targets(
             publisher = get_platform_publisher(target)
             raw_publish_result = publisher.publish(post)
             publish_result = _normalize_publish_result(raw_publish_result)
+
+            story_id = None
+            story_error = None
+            if getattr(target, "publish_story", False):
+                try:
+                    story_id = _publish_story_if_enabled(post, target, publisher)
+                except Exception as exc:
+                    story_error = str(exc)
+                    print(
+                        f"WARNING: Feed publish succeeded for target '{target.key}' "
+                        f"but story publish failed: {exc}"
+                    )
 
             store.mark_posted(
                 target_key=target.key,
@@ -195,8 +285,12 @@ def publish_to_targets(
                     "platform": target.platform,
                     "id": publish_result.remote_post_id,
                     "first_comment_id": publish_result.first_comment_id,
+                    "story_id": story_id,
+                    "story_error": story_error,
                     "generated_image_path": getattr(post, "generated_image_path", None),
                     "generated_image_public_url": getattr(post, "generated_image_public_url", None),
+                    "story_generated_image_path": getattr(post, "story_generated_image_path", None),
+                    "story_generated_image_public_url": getattr(post, "story_generated_image_public_url", None),
                     "image_url": getattr(post, "image_url", None),
                     "background_image_path": getattr(post, "background_image_path", None),
                     "background_image_photographer": getattr(post, "background_image_photographer", None),

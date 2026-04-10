@@ -30,22 +30,12 @@ class FacebookPublisher(BasePlatformPublisher):
         return payload
 
     def _normalize_public_image_url(self, image_url: str) -> str:
-        """
-        Meta is happier with http(s) URLs and common image extensions.
-        Leave the URL unchanged here; validation should happen elsewhere.
-        """
         return (image_url or "").strip()
 
     def _build_message(self, post: SocialPost) -> str:
-        """
-        Central wrapper so all Facebook message generation consistently passes target.
-        """
         return build_facebook_message(post, self.target)
 
     def _create_feed_post(self, post: SocialPost) -> str:
-        """
-        Standard text/link feed post.
-        """
         if not self.target.page_id:
             raise PlatformError(f"Target '{self.target.key}' is missing page_id")
 
@@ -63,9 +53,6 @@ class FacebookPublisher(BasePlatformPublisher):
         return post_id
 
     def _create_photo_post_from_url(self, post: SocialPost, image_url: str) -> str:
-        """
-        Photo-first Facebook post using a public image URL.
-        """
         if not self.target.page_id:
             raise PlatformError(f"Target '{self.target.key}' is missing page_id")
 
@@ -85,9 +72,6 @@ class FacebookPublisher(BasePlatformPublisher):
         return post_id
 
     def _create_photo_post_from_file(self, post: SocialPost, image_path: str) -> str:
-        """
-        Photo-first Facebook post using a locally generated image file.
-        """
         if not self.target.page_id:
             raise PlatformError(f"Target '{self.target.key}' is missing page_id")
 
@@ -108,10 +92,6 @@ class FacebookPublisher(BasePlatformPublisher):
         return post_id
 
     def _post_first_comment(self, object_id: str, message: str) -> str:
-        """
-        Add the article/deal URL as the first comment.
-        Commenting works on PagePost/Photo object comments edge.
-        """
         message = (message or "").strip()
         if not message:
             raise PlatformError("Cannot create first comment with empty message")
@@ -128,16 +108,75 @@ class FacebookPublisher(BasePlatformPublisher):
             raise PlatformError(f"Facebook comment created but no id returned: {payload}")
         return comment_id
 
-    def publish(self, post: SocialPost):
-        """
-        Returns a structured publish result.
+    def _upload_unpublished_photo_from_url(self, image_url: str) -> str:
+        if not self.target.page_id:
+            raise PlatformError(f"Target '{self.target.key}' is missing page_id")
 
-        Behavior:
-        - if image_url is present => create photo post from URL
-        - elif generated_image_path is present => upload local file to /photos
-        - else => create feed post
-        - if target requests first comment link => try comment after post creation
-        """
+        payload = self._post(
+            f"{self.target.page_id}/photos",
+            {
+                "url": image_url,
+                "published": "false",
+                "access_token": self.target.access_token,
+            },
+        )
+        photo_id = str(payload.get("id") or "").strip()
+        if not photo_id:
+            raise PlatformError(f"Facebook unpublished photo upload failed: missing photo id: {payload}")
+        return photo_id
+
+    def _upload_unpublished_photo_from_file(self, image_path: str) -> str:
+        if not self.target.page_id:
+            raise PlatformError(f"Target '{self.target.key}' is missing page_id")
+
+        with open(image_path, "rb") as image_file:
+            payload = self._post(
+                f"{self.target.page_id}/photos",
+                {
+                    "published": "false",
+                    "access_token": self.target.access_token,
+                },
+                files={"source": image_file},
+            )
+
+        photo_id = str(payload.get("id") or "").strip()
+        if not photo_id:
+            raise PlatformError(f"Facebook unpublished local photo upload failed: missing photo id: {payload}")
+        return photo_id
+
+    def publish_story(
+            self,
+            post: SocialPost,
+            *,
+            image_path: str | None = None,
+            image_url: str | None = None,
+        ) -> str:
+            if not self.target.page_id:
+                raise PlatformError(f"Target '{self.target.key}' is missing page_id")
+    
+            image_url = self._normalize_public_image_url(image_url or "")
+    
+            if not image_url:
+                raise PlatformError(
+                    f"Facebook story target '{self.target.key}' requires a public image_url. "
+                    f"Set SOCIAL_GENERATED_IMAGE_PUBLIC_BASE_URL so generated images are reachable."
+                )
+    
+            photo_id = self._upload_unpublished_photo_from_url(image_url)
+    
+            payload = self._post(
+                f"{self.target.page_id}/photo_stories",
+                {
+                    "photo_id": photo_id,
+                    "access_token": self.target.access_token,
+                },
+            )
+            story_id = str(payload.get("id") or "").strip()
+            if not story_id:
+                raise PlatformError(f"Facebook story created but no id returned: {payload}")
+            return story_id
+
+    def publish(self, post: SocialPost):
         if not self.target.page_id:
             raise PlatformError(f"Target '{self.target.key}' is missing page_id")
 

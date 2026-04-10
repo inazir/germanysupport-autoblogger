@@ -62,6 +62,9 @@ def get_social_targets() -> Dict[str, SocialTarget]:
         require_image = _to_bool(
             os.getenv(f"SOCIAL__{env_key}__REQUIRE_IMAGE", "false")
         )
+        publish_story = _to_bool(
+            os.getenv(f"SOCIAL__{env_key}__PUBLISH_STORY", "false")
+        )
 
         template = os.getenv(f"SOCIAL__{env_key}__TEMPLATE", "default").strip()
         image_style = os.getenv(
@@ -86,20 +89,21 @@ def get_social_targets() -> Dict[str, SocialTarget]:
 
         if not access_token:
             raise RuntimeError(f"Missing SOCIAL__{env_key}__ACCESS_TOKEN")
-        
+
         print(
-    "DEBUG TARGET",
-    {
-        "key": key,
-        "env_key": env_key,
-        "platform": platform,
-        "enabled": enabled,
-        "post_link_in_first_comment": post_link_in_first_comment,
-        "comment_fail_is_fatal": comment_fail_is_fatal,
-        "require_image": require_image,
-        "image_style": image_style,
-    },
-)
+            "DEBUG TARGET",
+            {
+                "key": key,
+                "env_key": env_key,
+                "platform": platform,
+                "enabled": enabled,
+                "post_link_in_first_comment": post_link_in_first_comment,
+                "comment_fail_is_fatal": comment_fail_is_fatal,
+                "require_image": require_image,
+                "publish_story": publish_story,
+                "image_style": image_style,
+            },
+        )
 
         targets[key] = SocialTarget(
             key=key,
@@ -120,6 +124,7 @@ def get_social_targets() -> Dict[str, SocialTarget]:
             utm_campaign=utm_campaign,
             max_caption_chars=max_caption_chars,
             skip_if_image_generation_fails=skip_if_image_generation_fails,
+            publish_story=publish_story,
         )
 
     return targets

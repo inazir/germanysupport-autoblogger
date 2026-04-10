@@ -24,3 +24,12 @@ class BasePlatformPublisher(ABC):
     @abstractmethod
     def publish(self, post: SocialPost) -> PublishResult:
         raise NotImplementedError
+
+    def publish_story(
+        self,
+        post: SocialPost,
+        *,
+        image_path: Optional[str] = None,
+        image_url: Optional[str] = None,
+    ) -> str:
+        raise PlatformError(f"Stories are not implemented for platform '{self.target.platform}'")

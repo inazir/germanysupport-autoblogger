@@ -259,6 +259,7 @@ def generate_branded_image(
     brand_text: str,
     output_dir: str | Path | None = None,
     filename_prefix: Optional[str] = None,
+    cta_text: Optional[str] = None,
 ) -> str:
     out_dir = Path(output_dir or DEFAULT_OUTPUT_DIR)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -303,7 +304,7 @@ def generate_branded_image(
     brand_font = _font(34, bold=True)
     badge_font = _font(24, bold=True)
     footer_font = _font(22, bold=False)
-    footer_bold = _font(26, bold=True)
+    cta_font = _font(26, bold=True)
 
     logo = _load_logo()
     brand_x = 112
@@ -328,9 +329,9 @@ def generate_branded_image(
 
     # Main content panel
     panel_left = 68
-    panel_top = 420      # was 500
+    panel_top = 420
     panel_right = size - 68
-    panel_bottom = 950   # was 900
+    panel_bottom = 950
 
     draw.rounded_rectangle(
         (panel_left, panel_top, panel_right, panel_bottom),
@@ -348,21 +349,18 @@ def generate_branded_image(
     inner_right = panel_right - 48
     title_max_width = inner_right - inner_left
 
-    # Fixed footer height reservation
-    footer_height = 62
+    # Footer reservation
+    footer_height = 110
     footer_y = panel_bottom - footer_height
-
-    # --- MEASURE everything before drawing ---
 
     title_font, title_lines = _fit_title(draw, post.title or "", max_width=title_max_width, max_lines=3)
 
-    # Measure total title block height
     title_line_heights = []
     for line in title_lines:
         bbox = draw.textbbox((0, 0), line, font=title_font, stroke_width=3)
         title_line_heights.append(bbox[3] - bbox[1])
     title_line_gap = 10
-    title_block_height = sum(title_line_heights) + title_line_gap * (len(title_line_heights) - 1)
+    title_block_height = sum(title_line_heights) + title_line_gap * (len(title_lines) - 1)
 
     summary = (getattr(post, "promo_text", None) or post.summary or "").strip()
     summary_font = summary_lines = None
@@ -377,26 +375,22 @@ def generate_branded_image(
             summary_line_heights.append(bbox[3] - bbox[1])
         summary_block_height = sum(summary_line_heights) + summary_line_gap * (len(summary_line_heights) - 1)
 
-    # Gap between title and summary — scales with title font size
     title_summary_gap = max(24, title_font.size // 3)
 
-    # Total content height
     total_content_height = title_block_height
     if summary_block_height:
         total_content_height += title_summary_gap + summary_block_height
 
-    # Available vertical space inside panel (between top padding and footer)
     panel_content_top = panel_top + 52
-    panel_content_bottom = footer_y - 16
+    panel_content_bottom = footer_y - 22
     available_height = panel_content_bottom - panel_content_top
 
-    # Vertically centre content if it fits; otherwise pin to top
     if total_content_height <= available_height:
         start_y = panel_content_top + (available_height - total_content_height) // 2
     else:
         start_y = panel_content_top
 
-    # --- DRAW title ---
+    # Draw title
     y = start_y
     for i, line in enumerate(title_lines):
         _draw_text_with_shadow(
@@ -412,7 +406,7 @@ def generate_branded_image(
         )
         y += title_line_heights[i] + (title_line_gap if i < len(title_lines) - 1 else 0)
 
-    # --- DRAW summary ---
+    # Draw summary
     if summary_font and summary_lines:
         summary_y = y + title_summary_gap
         for i, line in enumerate(summary_lines):
@@ -429,16 +423,50 @@ def generate_branded_image(
             )
             summary_y += summary_line_heights[i] + (summary_line_gap if i < len(summary_lines) - 1 else 0)
 
-    # Footer row — photo credit only
+    # CTA footer
+    cta_text = (cta_text or "Read full guide on GermanySupport.de").strip()
+    cta_bbox = draw.textbbox((0, 0), cta_text, font=cta_font)
+    cta_width = cta_bbox[2] - cta_bbox[0]
+    cta_height = cta_bbox[3] - cta_bbox[1]
+
+    cta_box_height = 56
+    cta_box_left = panel_left + 36
+    cta_box_right = panel_right - 36
+    cta_box_top = panel_bottom - cta_box_height - 26
+    cta_box_bottom = panel_bottom - 26
+
+    draw.rounded_rectangle(
+        (cta_box_left, cta_box_top, cta_box_right, cta_box_bottom),
+        radius=22,
+        fill=(17, 24, 39, 205),
+        outline=(255, 255, 255, 42),
+        width=2,
+    )
+
+    cta_x = cta_box_left + ((cta_box_right - cta_box_left) - cta_width) // 2
+    cta_y = cta_box_top + ((cta_box_bottom - cta_box_top) - cta_height) // 2 - 2
+
+    _draw_text_with_shadow(
+        draw,
+        (cta_x, cta_y),
+        cta_text,
+        font=cta_font,
+        fill=(255, 255, 255),
+        shadow_fill=(0, 0, 0, 120),
+        shadow_offset=(2, 3),
+    )
+
     photographer = getattr(post, "background_image_photographer", None)
     if photographer:
         credit = f"Photo: {photographer} / Pexels"
         credit_bbox = draw.textbbox((0, 0), credit, font=footer_font)
         credit_width = credit_bbox[2] - credit_bbox[0]
         credit_x = panel_right - 44 - credit_width
+        credit_y = cta_box_top - 34
+
         _draw_text_with_shadow(
             draw,
-            (credit_x, footer_y + 2),
+            (credit_x, credit_y),
             credit,
             font=footer_font,
             fill=(203, 213, 225),

@@ -46,3 +46,4 @@ class SocialTarget:
     utm_campaign: Optional[str] = None
     max_caption_chars: Optional[int] = None
     skip_if_image_generation_fails: bool = False
+    publish_story: bool = False

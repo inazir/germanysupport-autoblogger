@@ -27,6 +27,12 @@ def _build_query(*args) -> str:
     def _clean(value: str | None) -> str:
         return " ".join((value or "").strip().lower().split())
 
+    def _has_phrase(haystack: str, needle: str) -> bool:
+        return needle in haystack
+
+    def _score_keywords(text: str, keywords: list[str]) -> int:
+        return sum(1 for keyword in keywords if _has_phrase(text, keyword))
+
     title = ""
     summary = ""
     promo = ""
@@ -49,9 +55,71 @@ def _build_query(*args) -> str:
 
     text = " | ".join(x for x in [title, summary, promo, category, content_type] if x)
 
-    topic_queries: list[tuple[list[str], str]] = [
-        (
-            [
+    # Intent cues to make visual searches more relevant.
+    saving_terms = [
+        "save money",
+        "cheaper",
+        "reduce bill",
+        "lower bill",
+        "save on",
+        "kosten sparen",
+        "günstiger",
+        "billiger",
+        "sparen",
+    ]
+    compare_terms = [
+        "compare",
+        "comparison",
+        "vs",
+        "best provider",
+        "anbieter wechseln",
+        "wechseln",
+        "switch",
+        "tariff",
+        "tarif",
+    ]
+    apply_terms = [
+        "apply",
+        "application",
+        "documents required",
+        "required documents",
+        "checklist",
+        "appointment",
+        "termin",
+        "beantragen",
+        "unterlagen",
+    ]
+    family_terms = [
+        "family",
+        "child",
+        "children",
+        "kids",
+        "parent",
+        "parents",
+        "familie",
+        "kind",
+        "kinder",
+    ]
+    online_terms = [
+        "online",
+        "app",
+        "smartphone",
+        "digital",
+        "website",
+        "portal",
+    ]
+
+    has_saving = any(term in text for term in saving_terms)
+    has_compare = any(term in text for term in compare_terms)
+    has_apply = any(term in text for term in apply_terms)
+    has_family = any(term in text for term in family_terms)
+    has_online = any(term in text for term in online_terms)
+
+    # Weighted topic rules. Title matches count more than summary/category matches.
+    topic_rules: list[dict] = [
+        {
+            "name": "electricity",
+            "keywords": [
                 "electricity",
                 "strom",
                 "energy bill",
@@ -62,23 +130,27 @@ def _build_query(*args) -> str:
                 "stromanbieter",
                 "strompreis",
                 "gas bill",
+                "gas tariff",
                 "heating bill",
+                "heizkosten",
                 "nebenkosten",
             ],
-            "electricity meter home energy bill",
-        ),
-        (
-            [
+            "base_query": "electricity meter home energy",
+        },
+        {
+            "name": "solar",
+            "keywords": [
                 "solar",
                 "photovoltaic",
                 "pv",
                 "renewable energy",
                 "solar panel",
             ],
-            "solar panels house roof",
-        ),
-        (
-            [
+            "base_query": "solar panels modern house roof",
+        },
+        {
+            "name": "tax",
+            "keywords": [
                 "tax",
                 "steuer",
                 "tax return",
@@ -89,10 +161,11 @@ def _build_query(*args) -> str:
                 "tax refund",
                 "freelancer tax",
             ],
-            "tax documents calculator desk paperwork",
-        ),
-        (
-            [
+            "base_query": "tax documents calculator desk paperwork",
+        },
+        {
+            "name": "insurance",
+            "keywords": [
                 "insurance",
                 "versicherung",
                 "health insurance",
@@ -104,12 +177,14 @@ def _build_query(*args) -> str:
                 "car insurance",
                 "travel insurance",
                 "legal insurance",
+                "rechtsschutz",
                 "rechtschutz",
             ],
-            "insurance contract paperwork family home",
-        ),
-        (
-            [
+            "base_query": "insurance paperwork family home contract",
+        },
+        {
+            "name": "visa",
+            "keywords": [
                 "visa",
                 "residence permit",
                 "aufenthaltstitel",
@@ -121,10 +196,11 @@ def _build_query(*args) -> str:
                 "foreigners office",
                 "ausländerbehörde",
             ],
-            "passport visa documents travel",
-        ),
-        (
-            [
+            "base_query": "passport visa documents desk",
+        },
+        {
+            "name": "registration",
+            "keywords": [
                 "anmeldung",
                 "address registration",
                 "bürgeramt",
@@ -132,12 +208,14 @@ def _build_query(*args) -> str:
                 "registration certificate",
                 "bureaucracy",
                 "documents required",
+                "required documents",
                 "appointment",
             ],
-            "documents paperwork office appointment",
-        ),
-        (
-            [
+            "base_query": "documents paperwork office appointment",
+        },
+        {
+            "name": "banking",
+            "keywords": [
                 "bank",
                 "bank account",
                 "konto",
@@ -150,10 +228,11 @@ def _build_query(*args) -> str:
                 "n26",
                 "account opening",
             ],
-            "online banking smartphone payment card",
-        ),
-        (
-            [
+            "base_query": "online banking smartphone payment card",
+        },
+        {
+            "name": "investing",
+            "keywords": [
                 "credit card",
                 "debit card",
                 "mastercard",
@@ -166,10 +245,11 @@ def _build_query(*args) -> str:
                 "trade republic",
                 "scalable",
             ],
-            "bank card savings finance smartphone",
-        ),
-        (
-            [
+            "base_query": "personal finance savings smartphone card",
+        },
+        {
+            "name": "telecom",
+            "keywords": [
                 "sim",
                 "esim",
                 "mobile plan",
@@ -180,10 +260,11 @@ def _build_query(*args) -> str:
                 "phone contract",
                 "mobile contract",
             ],
-            "smartphone sim card mobile internet",
-        ),
-        (
-            [
+            "base_query": "smartphone sim card mobile internet",
+        },
+        {
+            "name": "housing",
+            "keywords": [
                 "rent",
                 "rental",
                 "wohnung",
@@ -198,10 +279,11 @@ def _build_query(*args) -> str:
                 "kaution",
                 "wg",
             ],
-            "apartment keys contract home",
-        ),
-        (
-            [
+            "base_query": "apartment keys rental contract home",
+        },
+        {
+            "name": "jobs",
+            "keywords": [
                 "job",
                 "salary",
                 "gross net",
@@ -213,10 +295,11 @@ def _build_query(*args) -> str:
                 "resume",
                 "work in germany",
             ],
-            "job interview laptop documents office",
-        ),
-        (
-            [
+            "base_query": "job interview laptop documents office",
+        },
+        {
+            "name": "family",
+            "keywords": [
                 "kindergeld",
                 "child benefit",
                 "family benefit",
@@ -226,25 +309,28 @@ def _build_query(*args) -> str:
                 "school",
                 "childcare",
             ],
-            "family children documents home",
-        ),
-        (
-            [
+            "base_query": "family children home documents",
+        },
+        {
+            "name": "travel",
+            "keywords": [
                 "travel",
                 "flight",
                 "hotel",
                 "holiday",
                 "urlaub",
+                "vacation",
                 "train",
                 "deutsche bahn",
                 "bahncard",
                 "transport",
                 "ticket",
             ],
-            "travel suitcase train station",
-        ),
-        (
-            [
+            "base_query": "travel suitcase train station",
+        },
+        {
+            "name": "car",
+            "keywords": [
                 "car",
                 "driving licence",
                 "driver license",
@@ -253,11 +339,13 @@ def _build_query(*args) -> str:
                 "auto insurance",
                 "parking",
                 "tuv",
+                "tüv",
             ],
-            "car keys documents",
-        ),
-        (
-            [
+            "base_query": "car keys documents",
+        },
+        {
+            "name": "medical",
+            "keywords": [
                 "doctor",
                 "hospital",
                 "medical",
@@ -266,10 +354,11 @@ def _build_query(*args) -> str:
                 "health card",
                 "krankenkasse",
             ],
-            "doctor appointment medical documents",
-        ),
-        (
-            [
+            "base_query": "doctor appointment medical documents",
+        },
+        {
+            "name": "deal",
+            "keywords": [
                 "deal",
                 "discount",
                 "offer",
@@ -280,13 +369,123 @@ def _build_query(*args) -> str:
                 "bonus",
                 "promo",
             ],
-            "shopping discount online deal",
-        ),
+            "base_query": "shopping discount online deal",
+        },
     ]
 
-    for keywords, query in topic_queries:
-        if any(keyword in text for keyword in keywords):
+    best_rule = None
+    best_score = 0
+
+    for rule in topic_rules:
+        keywords = rule["keywords"]
+
+        score = 0
+        score += _score_keywords(title, keywords) * 5
+        score += _score_keywords(summary, keywords) * 3
+        score += _score_keywords(promo, keywords) * 2
+        score += _score_keywords(category, keywords) * 3
+        score += _score_keywords(content_type, keywords) * 1
+
+        if score > best_score:
+            best_score = score
+            best_rule = rule
+
+    if best_rule:
+        topic = best_rule["name"]
+        query = best_rule["base_query"]
+
+        # Intent-sensitive refinements
+        if topic == "electricity":
+            if has_compare:
+                return "energy comparison laptop calculator home"
+            if has_saving:
+                return "electricity meter home savings"
             return query
+
+        if topic == "solar":
+            if has_saving:
+                return "solar panels house energy savings"
+            return query
+
+        if topic == "tax":
+            if "refund" in text or "erstattung" in text:
+                return "tax refund calculator paperwork desk"
+            if has_online:
+                return "online tax documents laptop desk"
+            return query
+
+        if topic == "insurance":
+            if has_family:
+                return "family insurance paperwork home"
+            if has_compare:
+                return "insurance comparison paperwork laptop"
+            return query
+
+        if topic == "visa":
+            if has_apply:
+                return "passport visa application documents desk"
+            return query
+
+        if topic == "registration":
+            if has_apply:
+                return "office appointment paperwork documents"
+            return query
+
+        if topic == "banking":
+            if has_online:
+                return "mobile banking smartphone payment"
+            if "transfer" in text or "remittance" in text:
+                return "money transfer smartphone app"
+            return query
+
+        if topic == "investing":
+            if "etf" in text or "broker" in text or "stock market" in text:
+                return "investing app smartphone finance"
+            return query
+
+        if topic == "telecom":
+            if "esim" in text:
+                return "smartphone esim mobile setup"
+            return query
+
+        if topic == "housing":
+            if "wg" in text:
+                return "apartment shared living rental home"
+            if has_family:
+                return "apartment family home keys"
+            return query
+
+        if topic == "jobs":
+            if "salary" in text or "brutto netto" in text or "gross net" in text:
+                return "salary calculator laptop desk"
+            return query
+
+        if topic == "family":
+            if has_apply:
+                return "family documents home paperwork"
+            return query
+
+        if topic == "travel":
+            if has_saving or has_compare:
+                return "travel planning budget laptop"
+            if "train" in text or "bahn" in text:
+                return "train station travel ticket"
+            return query
+
+        if topic == "car":
+            if "parking" in text:
+                return "car parking city street"
+            return query
+
+        if topic == "medical":
+            if has_apply:
+                return "doctor appointment paperwork clinic"
+            return query
+
+        if topic == "deal":
+            return "shopping discount online deal"
+
+        return query
 
     if "deal" in category or "deal" in content_type:
         return "shopping discount online deal"
@@ -295,7 +494,7 @@ def _build_query(*args) -> str:
         return "banking documents calculator"
 
     if "insurance" in category:
-        return "insurance contract paperwork family home"
+        return "insurance paperwork family home"
 
     if "guide" in content_type or "how to" in title:
         return "documents checklist paperwork desk"
@@ -323,6 +522,7 @@ def _build_query(*args) -> str:
         return " ".join(found[:4])
 
     return "documents paperwork germany"
+
 
 def search_photo(
     *,
