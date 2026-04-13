@@ -1,24 +1,22 @@
 """
-GermanySupport.de — AutoBlogger (Production v4)
+GermanySupport.de — AutoBlogger (Production v5)
 ================================================
-Changes in v4 (hardening pass):
+Changes in v5:
+  16. Explicit topics (--topic) and manual CSV topics are title-locked by default.
+      Claude may generate content, but EN title is forced to the chosen topic.
+  17. Locked EN titles are translated into DE for DE publish, and DE title is also locked.
+  18. Article prompts now explicitly require coverage of all named providers/brands
+      appearing in the topic title.
+  19. Newly added /go/ redirects can be auto-included when their slug/name appears
+      directly in the topic, even if LINK_RELEVANCE was not updated yet.
+  20. Plain-text auto-linking remains enabled as a conservative fallback after generation.
+
+Earlier changes (v4):
   12. Rewritten manual topics are written back to manual_topics.csv immediately,
       so the CSV always reflects the actual published topic.
-  13. Duplicate detection thresholds tightened conservatively:
-        sim_threshold  0.55 → 0.50  (title similarity)
-        kw_threshold   0.60 → 0.55  (keyword overlap)
-        slug ratio     0.85 → 0.80  (slug similarity)
-  14. Fallback when all rewrites are duplicates changed from "publish anyway"
-      to "mark row as skipped and exit cleanly" — safer, avoids cannibalization.
-  15. .env file auto-loaded from script directory if present (optional, no-op
-      if python-dotenv is not installed or file does not exist).
-
-Earlier changes (v3):
-  8.  Smart duplicate detection for manual CSV topics
-  9.  Auto-rewrite of duplicate topics into fresh SEO-friendly long-tail variants
-  10. Keyword-driven topic generation (SEO intent, long-tail, expat-focused)
-  11. AI-assisted candidate rewrites when first rewrite is still a duplicate
-  11b. Non-English (German) topics translated to EN before duplicate check
+  13. Duplicate detection thresholds tightened conservatively.
+  14. Duplicate rewrite fallback changed to skip instead of publish anyway.
+  15. .env file auto-loaded from script directory if present.
 
 Usage:
   python publish_article.py
@@ -65,17 +63,16 @@ try:
     from dotenv import load_dotenv
     _env_path = Path(__file__).parent / ".env"
     if _env_path.exists():
-        load_dotenv(dotenv_path=_env_path, override=False)  # shell env wins
+        load_dotenv(dotenv_path=_env_path, override=False)
         print(f"[dotenv] Loaded environment from {_env_path}")
 except ImportError:
-    pass  # python-dotenv not installed — rely on shell environment as before
+    pass
 
 from config import (
     CURRENT_YEAR,
     ALLOWED_CATEGORIES,
     get_relevant_links,
     fetch_referral_links,
-    format_referral_links,
     format_links_for_prompt,
     format_links_as_html,
     build_referral_replacement_map,
@@ -83,19 +80,12 @@ from config import (
     TAPTAP_PROMO_HTML,
 )
 
-# Backward-safe fallback in case format_referral_links is not present in config.py
-try:
-    format_referral_links
-except NameError:
-    def format_referral_links(relevant_links: dict) -> str:
-        return format_links_for_prompt(relevant_links)
-
 # ============================================================
 #  📝  LOGGING
 # ============================================================
 SCRIPT_DIR = Path(__file__).parent
-LOG_DIR    = SCRIPT_DIR / "logs"
-CACHE_DIR  = SCRIPT_DIR / "cache"
+LOG_DIR = SCRIPT_DIR / "logs"
+CACHE_DIR = SCRIPT_DIR / "cache"
 LOG_DIR.mkdir(exist_ok=True)
 CACHE_DIR.mkdir(exist_ok=True)
 
@@ -114,26 +104,24 @@ log = logging.getLogger(__name__)
 # ============================================================
 #  🔑  CREDENTIALS
 # ============================================================
-WP_URL        = os.environ["WP_URL"].rstrip("/")
-WP_USER       = os.environ["WP_USER"]
-WP_APP_PASS   = os.environ["WP_APP_PASS"]
+WP_URL = os.environ["WP_URL"].rstrip("/")
+WP_USER = os.environ["WP_USER"]
+WP_APP_PASS = os.environ["WP_APP_PASS"]
 ANTHROPIC_KEY = os.environ["ANTHROPIC_KEY"]
-PEXELS_KEY    = os.environ["PEXELS_KEY"]
+PEXELS_KEY = os.environ["PEXELS_KEY"]
 
-# SMTP settings for success/failure notifications.
-# Safe fallback defaults keep existing publishing logic unaffected if email envs are missing.
-SMTP_HOST     = os.getenv("SMTP_HOST", "smtp.hostinger.com")
-SMTP_PORT     = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER     = os.getenv("SMTP_USER")
-SMTP_PASS     = os.getenv("SMTP_PASS")
-ALERT_TO      = os.getenv("ALERT_TO")
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.hostinger.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER")
+SMTP_PASS = os.getenv("SMTP_PASS")
+ALERT_TO = os.getenv("ALERT_TO")
 
 # ============================================================
 #  ⚙️  SETTINGS
 # ============================================================
-CLAUDE_MODEL    = "claude-sonnet-4-20250514"
-MAX_TOKENS      = 6000
-RETRY_MAX       = 5
+CLAUDE_MODEL = "claude-sonnet-4-20250514"
+MAX_TOKENS = 6000
+RETRY_MAX = 5
 RETRY_BASE_SECS = 10
 
 # ============================================================
@@ -141,11 +129,6 @@ RETRY_BASE_SECS = 10
 # ============================================================
 
 def send_email(subject: str, body: str, to_email: Optional[str] = None) -> bool:
-    """
-    Send an email using Hostinger SMTP.
-    This is intentionally fail-safe: if SMTP env vars are missing or sending fails,
-    the publish pipeline continues exactly as before.
-    """
     recipient = to_email or ALERT_TO
 
     if not SMTP_USER or not SMTP_PASS or not recipient:
@@ -179,14 +162,6 @@ def send_email(subject: str, body: str, to_email: Optional[str] = None) -> bool:
 LIVE_DIRECT_TO_GO_MAP = {}
 
 def enforce_go_links(html: str, wp_base: str) -> tuple:
-    """
-    Canonicalise affiliate URLs to germanysupport.de/go/{slug}.
-
-    Critical rule:
-    - Only replace URLs that are derived directly from the WordPress plugin
-      response (LIVE_DIRECT_TO_GO_MAP), plus malformed internal /go/ URLs.
-    - Do not guess slugs from product names or domains.
-    """
     replacements = []
     replacement_map = LIVE_DIRECT_TO_GO_MAP or {}
 
@@ -285,16 +260,6 @@ def slug_to_aliases(slug: str) -> List[str]:
 
 
 def build_autolink_candidates(rel_links: dict, wp_base: str) -> List[Tuple[str, str]]:
-    """
-    Build (visible_text, go_url) candidates.
-
-    Priority:
-    1. names from rel_links passed into the article prompt
-    2. slugs from live referral links fetched from WordPress
-
-    This catches newly added redirects even when topic relevance
-    selection missed them.
-    """
     candidates: List[Tuple[str, str]] = []
     seen = set()
 
@@ -309,7 +274,6 @@ def build_autolink_candidates(rel_links: dict, wp_base: str) -> List[Tuple[str, 
         seen.add(key)
         candidates.append((text, go_url))
 
-    # Current article's explicitly relevant links
     for name, url in (rel_links or {}).items():
         slug = extract_go_slug(url, wp_base)
         if not slug:
@@ -319,7 +283,6 @@ def build_autolink_candidates(rel_links: dict, wp_base: str) -> List[Tuple[str, 
         for alias in slug_to_aliases(slug):
             add_candidate(alias, go_url)
 
-    # All live WP redirects
     try:
         live_links = fetch_referral_links(wp_base, force=False) or {}
         for key, url in live_links.items():
@@ -332,7 +295,6 @@ def build_autolink_candidates(rel_links: dict, wp_base: str) -> List[Tuple[str, 
     except Exception as e:
         log.warning(f"  Autolink candidate build skipped: {e}")
 
-    # Longer phrases first, so multi-word aliases win before shorter ones
     candidates.sort(key=lambda x: len(x[0]), reverse=True)
     return candidates
 
@@ -343,13 +305,6 @@ def autolink_plain_text_mentions(
     wp_base: str,
     max_total_links: int = 8,
 ) -> Tuple[str, int]:
-    """
-    Convert first plain-text mentions outside existing <a> tags into clickable /go/ links.
-    Conservative behavior:
-    - only outside existing anchors
-    - only first plain-text match per slug
-    - skips slugs already linked in the article
-    """
     if not html:
         return html, 0
 
@@ -546,7 +501,7 @@ HEADERS = build_headers()
 
 def wp_request(method, endpoint, **kwargs):
     url = f"{WP_URL}/wp-json/wp/v2/{endpoint}"
-    r   = requests.request(method, url, headers=HEADERS, timeout=30, **kwargs)
+    r = requests.request(method, url, headers=HEADERS, timeout=30, **kwargs)
     if not r.ok:
         raise Exception(f"WP {r.status_code}: {r.text[:300]}")
     return r.json()
@@ -564,8 +519,10 @@ def fetch_all_post_data():
     posts, page = [], 1
     while True:
         r = requests.get(
-            f"{WP_URL}/wp-json/wp/v2/posts", headers=HEADERS,
-            params={"per_page": 100, "page": page, "status": "publish", "_fields": "id,title,slug,link"}, timeout=30
+            f"{WP_URL}/wp-json/wp/v2/posts",
+            headers=HEADERS,
+            params={"per_page": 100, "page": page, "status": "publish", "_fields": "id,title,slug,link"},
+            timeout=30,
         )
         if r.status_code == 400:
             break
@@ -581,33 +538,17 @@ def fetch_all_post_data():
 
 
 def find_duplicate(topic, all_posts, sim_threshold=0.50, kw_threshold=0.55):
-    """
-    Returns (True, post) if topic is too similar to an existing published post,
-    or (False, None) if it is fresh enough to publish.
-
-    Thresholds (v4 — tightened conservatively vs v3):
-      slug_ratio     0.85 → 0.80   catches more slug-level near-duplicates
-      sim_threshold  0.55 → 0.50   catches slightly weaker title overlaps
-      kw_threshold   0.60 → 0.55   catches slightly weaker keyword overlaps
-
-    These are conservative adjustments: they reduce the chance of cannibalizing
-    an existing article without being so strict that the script can't find fresh
-    topics on a mid-size site.
-    """
     candidate_slug = re.sub(r'[^a-z0-9]+', '-', topic.lower())[:80].strip('-')
     for post in all_posts:
         existing_title = post["title"]["rendered"]
-        existing_slug  = post.get("slug", "")
+        existing_slug = post.get("slug", "")
 
-        # 1. Slug similarity (catches URL-level collisions)
         if candidate_slug and existing_slug and SequenceMatcher(None, candidate_slug, existing_slug).ratio() > 0.80:
             return True, post
 
-        # 2. Full title string similarity
         if SequenceMatcher(None, topic.lower(), existing_title.lower()).ratio() >= sim_threshold:
             return True, post
 
-        # 3. Keyword overlap (4+ char words only, to filter stop-words)
         words_a = set(re.findall(r'\b\w{4,}\b', topic.lower()))
         words_b = set(re.findall(r'\b\w{4,}\b', existing_title.lower()))
         if words_a and len(words_a & words_b) / len(words_a) >= kw_threshold:
@@ -628,24 +569,11 @@ _DE_SIGNAL_WORDS = {
 }
 
 def _is_likely_non_english(text: str) -> bool:
-    """
-    Return True when the topic string appears to be written in a language
-    other than English.  Uses a simple word-overlap heuristic against a
-    short German signal-word list — cheap, no API call needed.
-    """
     words = set(re.findall(r'\b\w+\b', text.lower()))
     return bool(words & _DE_SIGNAL_WORDS)
 
 
 def translate_topic_to_english(topic: str) -> str:
-    """
-    Translate a non-English topic string to English using a minimal Claude call.
-    Used only for duplicate-detection purposes — the original topic string is
-    still passed to the article generator (which handles language via its own
-    system prompt).
-
-    Returns the English translation, or the original string on any failure.
-    """
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
     def _call():
@@ -671,6 +599,36 @@ def translate_topic_to_english(topic: str) -> str:
         log.warning(f"  Topic translation failed ({e}); using original for dedup.")
         return topic
 
+# ============================================================
+#  🔒  TITLE LOCK HELPERS
+# ============================================================
+
+def translate_locked_title_to_german(title_en: str) -> str:
+    client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+
+    prompt = (
+        "Translate the following article title into natural German.\n"
+        "Rules:\n"
+        "- Keep all brand/provider/product names exactly as they are.\n"
+        "- Keep all compared entities present.\n"
+        "- Do not shorten.\n"
+        "- Return ONLY the translated title.\n\n"
+        f"{title_en}"
+    )
+
+    def _call():
+        return client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=120,
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+    try:
+        r = claude_with_retry(_call)
+        return r.content[0].text.strip().strip('"').strip("'")
+    except Exception as e:
+        log.warning(f"  Locked DE title translation failed ({e}); falling back to EN title.")
+        return title_en
 
 # ============================================================
 #  ✨  SEO DUPLICATE REWRITE
@@ -694,30 +652,21 @@ SEO_INTENT_MODIFIERS = [
 ]
 
 def _strip_year(text: str) -> str:
-    """Remove a trailing 4-digit year (e.g. 2024, 2025, 2026) from a topic string."""
     return re.sub(r'\b20\d{2}\b', '', text).strip(' :–-')
 
 
 def rewrite_duplicate_topic_simple(original_topic: str) -> list[str]:
-    """
-    Produce rule-based rewrites by stripping any existing year and appending
-    SEO intent modifiers.  Cheap (no API call), tried first.
-    Returns candidate strings in priority order.
-    """
     base = _strip_year(original_topic)
     base = re.sub(
         r'\s*[:\-–]\s*(guide|comparison|review|requirements|costs?|tips?|explained).*$',
-        '', base, flags=re.IGNORECASE
+        '',
+        base,
+        flags=re.IGNORECASE
     ).strip()
     return [f"{base}: {modifier}" for modifier in SEO_INTENT_MODIFIERS]
 
 
 def rewrite_duplicate_topic_ai(original_topic: str, existing_titles: list[str], count: int = 8) -> list[str]:
-    """
-    Ask Claude for SEO-friendly long-tail rewrites of a duplicate topic.
-    Used as fallback after rule-based rewrites are exhausted.
-    Returns a list of candidate topic strings.
-    """
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
     existing_str = "\n".join(f"- {t}" for t in existing_titles[:60])
 
@@ -766,24 +715,6 @@ def resolve_manual_topic_with_dedup(
     all_posts: list,
     max_ai_attempts: int = 2,
 ) -> tuple[str, bool]:
-    """
-    Smart duplicate handling for a manual CSV topic.
-
-    Strategy (in order):
-      1. No duplicate found → use as-is.
-      2. Rule-based SEO rewrites (no API cost) → first non-duplicate wins.
-      3. AI rewrites (up to max_ai_attempts × 8 candidates).
-      4. All candidates still duplicates → return (None, True).
-         Caller marks the row "skipped" for manual review instead of
-         force-publishing a weak candidate (v4 safer fallback).
-
-    Non-English topics: translated to English internally before dedup;
-    the original string is preserved for article generation.
-
-    Returns:
-      (final_topic, was_rewritten)
-        final_topic=None means "no safe topic found — skip this row"
-    """
     topic_for_dedup = (
         translate_topic_to_english(original_topic)
         if _is_likely_non_english(original_topic)
@@ -793,7 +724,7 @@ def resolve_manual_topic_with_dedup(
     is_dup, match = find_duplicate(topic_for_dedup, all_posts)
 
     if not is_dup:
-        return original_topic, False  # clean — publish as written
+        return original_topic, False
 
     matched_title = match["title"]["rendered"] if match else "unknown"
     log.warning(
@@ -806,13 +737,11 @@ def resolve_manual_topic_with_dedup(
     existing_titles = [p["title"]["rendered"] for p in all_posts]
     rewrite_base = topic_for_dedup
 
-    # --- Step 2: Rule-based rewrites (no API) ---
     for candidate in rewrite_duplicate_topic_simple(rewrite_base):
         if not find_duplicate(candidate, all_posts)[0]:
             log.info(f"  [REWRITE] Rule-based rewrite chosen: {candidate}")
             return candidate, True
 
-    # --- Step 3: AI rewrites ---
     for attempt in range(1, max_ai_attempts + 1):
         log.info(f"  [REWRITE] AI rewrite attempt {attempt}/{max_ai_attempts}...")
         for candidate in rewrite_duplicate_topic_ai(rewrite_base, existing_titles, count=8):
@@ -820,12 +749,11 @@ def resolve_manual_topic_with_dedup(
                 log.info(f"  [REWRITE] AI rewrite chosen (attempt {attempt}): {candidate}")
                 return candidate, True
 
-    # --- Step 4: Skip safely (v4) ---
     log.warning(
         f"  [REWRITE] All rewrite candidates still duplicate.\n"
         f"  Skipping '{original_topic}' — row will be marked 'skipped' for manual review."
     )
-    return None, True  # None = skip this topic
+    return None, True
 
 # ============================================================
 #  🗂️  MANUAL TOPIC QUEUE
@@ -867,30 +795,18 @@ def get_next_manual_topic():
     return None, None, rows
 
 def mark_manual_topic_done(rows, idx):
-    """Mark a CSV row as done and persist to disk."""
     if idx is None or idx < 0 or idx >= len(rows):
         return
     rows[idx]["status"] = "done"
     save_manual_topics(rows)
 
 def mark_manual_topic_skipped(rows, idx):
-    """
-    Mark a CSV row as 'skipped' (v4).
-    Used when all rewrite attempts produce duplicate candidates.
-    The row stays in the CSV so a human can update the topic and re-queue it
-    by changing the status back to 'pending'.
-    """
     if idx is None or idx < 0 or idx >= len(rows):
         return
     rows[idx]["status"] = "skipped"
     save_manual_topics(rows)
 
 def update_manual_topic_text(rows, idx, new_topic: str):
-    """
-    Overwrite the topic cell in a CSV row with the rewritten topic (v4).
-    Called immediately after a successful rewrite, before publishing, so
-    the CSV always reflects what was actually published.
-    """
     if idx is None or idx < 0 or idx >= len(rows):
         return
     rows[idx]["topic"] = new_topic
@@ -901,19 +817,6 @@ def parse_manual_products(row):
     return [p.strip() for p in raw.split("|") if p.strip()]
 
 def normalize_publish_mode(language_value: str = "", skip_translate: bool = False) -> str:
-    """
-    Returns one of:
-      - "both"  -> publish EN + DE
-      - "en"    -> publish EN only
-      - "de"    -> publish DE only
-
-    Rules:
-    - CLI --skip-translate forces EN only
-    - CSV language values:
-        "" / "both" -> both
-        "en"        -> en
-        "de"        -> de
-    """
     if skip_translate:
         return "en"
     value = (language_value or "").strip().lower()
@@ -958,11 +861,6 @@ def pick_fresh_topic(all_posts, custom_topic=None):
 
 
 def _generate_topics_api(existing_titles, count=20):
-    """
-    Generate SEO-driven long-tail topic ideas for expats in Germany.
-    Prompts Claude to favour clear search intent, long-tail structure,
-    and ranking potential — not just generic article ideas.
-    """
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
     existing_str = "\n".join(f"- {t}" for t in existing_titles)
 
@@ -994,7 +892,7 @@ def _generate_topics_api(existing_titles, count=20):
             messages=[{"role": "user", "content": prompt}],
         )
 
-    r   = claude_with_retry(_call)
+    r = claude_with_retry(_call)
     raw = r.content[0].text.strip()
     raw = re.sub(r"^```json\s*", "", raw)
     raw = re.sub(r"```$", "", raw).strip()
@@ -1004,14 +902,28 @@ def _generate_topics_api(existing_titles, count=20):
 #  🔗  REFERRAL LINK RESOLUTION
 # ============================================================
 
+def _humanize_slug(slug: str) -> str:
+    text = slug.replace("-", " ").strip()
+    words = []
+    for word in text.split():
+        if word.upper() in {"DSL", "SIM", "PKV", "GKV"}:
+            words.append(word.upper())
+        elif word.lower() in {"n26", "c24", "o2", "eon", "eprimo"}:
+            words.append(word.upper() if word.lower() in {"eon"} else word)
+        else:
+            words.append(word.capitalize())
+    return " ".join(words) if words else slug
+
+
 def resolve_referral_links(topic: str, content_hint: str = "", forced_products=None) -> dict:
     fetch_referral_links(WP_URL, force=True)
     global LIVE_DIRECT_TO_GO_MAP
     LIVE_DIRECT_TO_GO_MAP = build_referral_replacement_map(WP_URL)
     log.info(f"    Loaded {len(LIVE_DIRECT_TO_GO_MAP)} raw→/go/ replacement rules from WordPress plugin")
-    rel = get_relevant_links(topic, content_hint, WP_URL)
 
+    rel = get_relevant_links(topic, content_hint, WP_URL)
     verified = {}
+
     for name, url in rel.items():
         if not url.startswith("http"):
             url = WP_URL.rstrip("/") + "/" + url.lstrip("/")
@@ -1019,8 +931,21 @@ def resolve_referral_links(topic: str, content_hint: str = "", forced_products=N
             log.warning(f"Link '{name}' does not use /go/ path: {url}")
         verified[name] = url
 
+    live_links = fetch_referral_links(WP_URL, force=False) or {}
+    topic_lc = (topic or "").lower()
+
+    # Auto-include redirects whose slug text appears directly in the topic.
+    for slug_key, url in live_links.items():
+        slug = slug_key.replace("go/", "").strip().lower()
+        aliases = slug_to_aliases(slug)
+        matched = any(alias.lower() in topic_lc for alias in aliases)
+        if matched:
+            display_name = _humanize_slug(slug)
+            if display_name not in verified:
+                verified[display_name] = url
+                log.info(f"  Topic-matched live redirect added: {display_name} -> {url}")
+
     if forced_products:
-        live_links = fetch_referral_links(WP_URL, force=False)
         display_to_slug = {
             "ace": "go/ace", "ace money transfer": "go/ace",
             "taptap": "go/taptap", "taptap send": "go/taptap",
@@ -1035,6 +960,7 @@ def resolve_referral_links(topic: str, content_hint: str = "", forced_products=N
             "steuergo": "go/steuergo", "wiso": "go/wiso",
             "vodafone": "go/vodafone", "telekom": "go/telekom",
             "huk24": "go/huk24",
+            "preisvergleich": "go/preisvergleich",
         }
         for product in forced_products:
             key = product.strip().lower()
@@ -1079,28 +1005,14 @@ def set_rank_math_seo(post_id: int, keyword: str, meta_title: str, meta_descript
     log.warning(f"  Rank Math keyword NOT set — do manually: '{keyword}'")
     return False
 
-
 # ============================================================
-#  🛠️  SEO NORMALISER (minimal hardening)
-#
-#  Why this was added:
-#  Rank Math scores were inconsistent because Claude sometimes returns
-#  SEO fields that are structurally valid JSON but weak for Rank Math's
-#  checklist-based tests (keyword missing in title/slug/meta/intro/H2).
-#
-#  This helper makes only the minimum safe adjustments before publish.
-#  It does NOT change the rest of the publishing pipeline.
+#  🛠️  SEO NORMALISER
 # ============================================================
-
-def _strip_html_tags(text: str) -> str:
-    return re.sub(r"<[^>]+>", " ", text or "").strip()
 
 def _collapse_spaces(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "")).strip()
 
 def _make_slug(text: str, max_len: int = 60) -> str:
-    # Keep existing behavior simple and deterministic. ASCII-only slug is fine
-    # for EN and DE in WordPress and improves exact keyword matching.
     text = (text or "").lower()
     text = re.sub(r"[äàáâãå]", "a", text)
     text = re.sub(r"[öòóôõ]", "o", text)
@@ -1134,7 +1046,6 @@ def _ensure_keyword_in_intro(content: str, keyword: str) -> str:
         return content
 
     intro = f"<p><strong>{html_lib.escape(keyword)}</strong> is one of the most searched topics for expats in Germany. This guide explains the key facts, costs, options and practical steps you should know.</p>"
-    # Insert intro before first heading if possible, else prepend.
     h_match = re.search(r"<h[1-6][^>]*>", content, flags=re.IGNORECASE)
     if h_match:
         return content[:h_match.start()] + intro + content[h_match.start():]
@@ -1146,7 +1057,6 @@ def _ensure_keyword_in_h2(content: str, keyword: str) -> str:
     if re.search(rf"<h2[^>]*>.*?{re.escape(keyword)}.*?</h2>", content, flags=re.IGNORECASE | re.DOTALL):
         return content
 
-    # Minimal change: update the first H2 only if none contains the keyword.
     def repl(match):
         inner = re.sub(r"<[^>]+>", "", match.group(1)).strip()
         new_inner = f"{html_lib.escape(keyword)}: {inner}" if inner else html_lib.escape(keyword)
@@ -1154,52 +1064,44 @@ def _ensure_keyword_in_h2(content: str, keyword: str) -> str:
 
     return re.sub(r"<h2[^>]*>(.*?)</h2>", repl, content, count=1, flags=re.IGNORECASE | re.DOTALL)
 
-def normalize_article_seo(article: dict, topic: str, lang: str = "en") -> dict:
-    """
-    Minimal SEO hardening layer applied after Claude returns JSON.
-
-    Guarantees, as far as possible without rewriting the whole article:
-    - focus keyword exists
-    - keyword appears in title
-    - slug contains the keyword
-    - meta description contains the keyword
-    - keyword appears near the beginning of content
-    - at least one H2 contains the keyword
-    """
+def normalize_article_seo(article: dict, topic: str, lang: str = "en", locked_title: Optional[str] = None) -> dict:
     article = dict(article or {})
 
     original_title = _first_nonempty(article.get("title"), topic, "Germany Guide")
     original_keyword = _first_nonempty(article.get("focus_keyword"), topic, original_title)
 
-    # Keep the keyword concise and Rank-Math-friendly.
-    keyword = _collapse_spaces(re.sub(r"[|:–-]\s*(guide|review|comparison|explained|requirements|costs?)\b.*$", "", original_keyword, flags=re.IGNORECASE))
+    if locked_title:
+        title = _collapse_spaces(locked_title)
+    else:
+        title = original_title
+
+    keyword = _collapse_spaces(
+        re.sub(r"[|:–-]\s*(guide|review|comparison|explained|requirements|costs?)\b.*$", "", original_keyword, flags=re.IGNORECASE)
+    )
     keyword = keyword[:65].strip(" -:|")
     if not keyword:
         keyword = _collapse_spaces(topic)[:65]
 
-    title = original_title
-    if keyword and keyword.lower() not in title.lower():
-        # Minimal / safe: prepend keyword instead of fully rewriting Claude's title.
+    if not locked_title and keyword and keyword.lower() not in title.lower():
         title = f"{keyword}: {title}"
 
-    slug_source = _first_nonempty(article.get("slug"), keyword, title)
-    # Prefer exact keyword in slug because Rank Math checks this explicitly.
-    slug = _make_slug(keyword or slug_source, max_len=60) or _make_slug(slug_source, max_len=60)
+    slug_source = _first_nonempty(article.get("slug"), title, keyword)
+    slug = _make_slug(title or slug_source, max_len=60) or _make_slug(slug_source, max_len=60)
 
     meta = _first_nonempty(article.get("meta_description"))
-    if not meta or keyword.lower() not in meta.lower():
+    if not meta or (keyword and keyword.lower() not in meta.lower()):
         if lang == "de":
-            meta = f"{keyword} in Deutschland: verständlicher Guide für Expats mit Kosten, Voraussetzungen, Tipps und den besten Optionen."
+            meta = f"{title} in Deutschland: verständlicher Guide für Expats mit Kosten, Voraussetzungen, Vergleich und praktischen Tipps."
         else:
-            meta = f"{keyword} in Germany explained for expats: costs, requirements, best options, practical tips and what to do step by step."
+            meta = f"{title} in Germany explained for expats: comparison, costs, options, pros and cons, and practical tips before you choose."
     meta = _trim_meta_description(meta)
 
     content = article.get("content", "")
-    content = _ensure_keyword_in_intro(content, keyword)
-    content = _ensure_keyword_in_h2(content, keyword)
+    content = _ensure_keyword_in_intro(content, keyword or title[:60])
+    content = _ensure_keyword_in_h2(content, keyword or title[:60])
 
     article["title"] = title
-    article["focus_keyword"] = keyword
+    article["focus_keyword"] = keyword or title[:65]
     article["slug"] = slug
     article["meta_description"] = meta
     article["content"] = content
@@ -1209,8 +1111,9 @@ def normalize_article_seo(article: dict, topic: str, lang: str = "en") -> dict:
 #  ✍️  ARTICLE GENERATION (EN)
 # ============================================================
 
-def generate_article_en(topic: str, rel_links: dict) -> dict:
-    cached = load_cached_article(topic)
+def generate_article_en(topic: str, rel_links: dict, locked_title: Optional[str] = None) -> dict:
+    cache_name = topic if not locked_title else f"LOCKED_EN::{topic}"
+    cached = load_cached_article(cache_name)
     if cached:
         return cached
 
@@ -1233,17 +1136,18 @@ JSON schema (all fields required):
 {{"title":"string","slug":"string max 60 chars","meta_description":"string 150-155 chars","focus_keyword":"string","tags":["string"],"categories":["string"],"image_search_query":"string 2-4 words","content":"HTML string"}}
 
 CONTENT RULES:
-- 1200-1500 words (stay under token limit)
+- 1200-1500 words
 - Focus keyword in first sentence, 2+ H2 headings, ~1% density
 - Short paragraphs (2-4 sentences)
 - Include HTML comparison table if comparing products
+- If the topic title explicitly names brands/providers/products, every named item must be covered in the article and included in any comparison table.
 - Embed ALL affiliate links below using <a href="URL" target="_blank" rel="nofollow sponsored">CTA text</a>
-- Use ONLY the exact affiliate URLs provided below. Do NOT invent, shorten, expand, replace, or modify any URL.
+- Use ONLY the exact affiliate URLs provided below.
+- Do NOT invent, shorten, expand, replace, or modify any URL.
 - Do NOT include any external product/referral/tracking URL unless it appears exactly in the list below.
 - TapTap: always mention promo code IQBAL12 + €10 bonus for €50+
-- Add FAQ section at end using Rank Math schema:
-  <div class="rank-math-faq-item"><h3 class="rank-math-question">Q?</h3><div class="rank-math-answer"><p>Answer.</p></div></div>
-- NO affiliate disclosure box (theme adds it)
+- Add FAQ section at end using Rank Math schema.
+- NO affiliate disclosure box.
 
 CATEGORIES (pick 1-2, exact names only):
 {cats_str}
@@ -1251,7 +1155,14 @@ CATEGORIES (pick 1-2, exact names only):
 AFFILIATE LINKS (ALL must appear in content):
 {links_html}"""
 
-    user = f"Write a high-conversion SEO article in English for this topic: {topic}"
+    if locked_title:
+        user = (
+            f"Write a high-conversion SEO article in English for this topic: {topic}\n\n"
+            f"Important: preserve this exact final English title verbatim in the JSON title field:\n"
+            f"{locked_title}"
+        )
+    else:
+        user = f"Write a high-conversion SEO article in English for this topic: {topic}"
 
     def _call():
         return client.messages.create(
@@ -1265,6 +1176,9 @@ AFFILIATE LINKS (ALL must appear in content):
     r = claude_with_retry(_call)
     raw = r.content[0].text.strip()
     article = _parse_json_safe(raw, "failed_en_article.txt")
+
+    if locked_title:
+        article["title"] = locked_title
 
     for name, url in rel_links.items():
         if url not in article.get("content", ""):
@@ -1286,17 +1200,21 @@ AFFILIATE LINKS (ALL must appear in content):
         if auto_linked_count:
             log.info(f"  Auto-linked {auto_linked_count} plain-text mention(s) in EN article")
 
-    article = normalize_article_seo(article, topic, lang="en")
-
-    save_cached_article(topic, article)
+    article = normalize_article_seo(article, topic, lang="en", locked_title=locked_title)
+    save_cached_article(cache_name, article)
     return article
 
 # ============================================================
 #  ✍️  ARTICLE TRANSLATION (DE)
 # ============================================================
 
-def generate_article_de(en_article: dict, rel_links: dict) -> dict:
-    de_cache_key = f"DE_{en_article.get('slug', 'unknown')}"
+def generate_article_de(
+    en_article: dict,
+    rel_links: dict,
+    locked_title_de: Optional[str] = None,
+) -> dict:
+    base_slug = en_article.get("slug", "unknown")
+    de_cache_key = f"DE_{base_slug}" if not locked_title_de else f"LOCKED_DE_{base_slug}"
     cached = load_cached_article(de_cache_key)
     if cached:
         return cached
@@ -1321,13 +1239,14 @@ JSON-Schema:
 {{"title":"string","slug":"string max 60","meta_description":"string 150-155 Zeichen","focus_keyword":"string","tags":["string"],"categories":["string"],"content":"HTML string"}}
 
 REGELN:
-- Natürliches, flüssiges Deutsch — kein maschineller Stil
+- Natürliches, flüssiges Deutsch
 - Deutsche SEO-Keywords
 - Alle HTML-Tags beibehalten
 - Affiliate-Links beibehalten — nur Linktext übersetzen, URLs NICHT ändern
-- Nutze NUR die unten angegebenen exakten URLs. Keine erfundenen oder geänderten Links.
+- Wenn im Thema explizit Marken/Anbieter/Produkte genannt werden, müssen alle genannten Einträge im Inhalt vorkommen und in Vergleichstabellen enthalten sein.
+- Nutze NUR die unten angegebenen exakten URLs.
 - TapTap: Promo-Code IQBAL12 erwähnen, €10 Bonus für €50+
-- FAQ-Sektion am Ende mit Rank Math Schema (rank-math-faq-item)
+- FAQ-Sektion am Ende mit Rank Math Schema
 - KEIN Disclosure-Box
 
 KATEGORIEN (1-2, exakte Namen):
@@ -1336,9 +1255,20 @@ KATEGORIEN (1-2, exakte Namen):
 AFFILIATE-LINKS (alle müssen im Content erscheinen):
 {links_html}"""
 
-    user = (f"Übersetze und optimiere für deutsche Expats:\n\n"
+    if locked_title_de:
+        user = (
+            f"Übersetze und optimiere für deutsche Expats:\n\n"
             f"TITEL: {en_article['title']}\n\n"
-            f"INHALT:\n{en_content}")
+            f"INHALT:\n{en_content}\n\n"
+            f"Wichtig: Verwende exakt diesen finalen deutschen Titel im JSON-Feld 'title':\n"
+            f"{locked_title_de}"
+        )
+    else:
+        user = (
+            f"Übersetze und optimiere für deutsche Expats:\n\n"
+            f"TITEL: {en_article['title']}\n\n"
+            f"INHALT:\n{en_content}"
+        )
 
     def _call():
         return client.messages.create(
@@ -1352,6 +1282,9 @@ AFFILIATE-LINKS (alle müssen im Content erscheinen):
     r = claude_with_retry(_call)
     raw = r.content[0].text.strip()
     article = _parse_json_safe(raw, "failed_de_article.txt")
+
+    if locked_title_de:
+        article["title"] = locked_title_de
 
     if article.get("content"):
         cleaned, swaps = enforce_go_links(article["content"], WP_URL)
@@ -1367,7 +1300,12 @@ AFFILIATE-LINKS (alle müssen im Content erscheinen):
         if auto_linked_count:
             log.info(f"  Auto-linked {auto_linked_count} plain-text mention(s) in DE article")
 
-    article = normalize_article_seo(article, article.get("title") or en_article.get("title", ""), lang="de")
+    article = normalize_article_seo(
+        article,
+        article.get("title") or en_article.get("title", ""),
+        lang="de",
+        locked_title=locked_title_de,
+    )
 
     save_cached_article(de_cache_key, article)
     return article
@@ -1401,12 +1339,14 @@ def _parse_json_safe(raw: str, error_filename: str = "failed.txt") -> dict:
 
     log.warning("JSON malformed — asking Claude to repair (no content regenerated)...")
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+
     def _repair_call():
         return client.messages.create(
             model=CLAUDE_MODEL,
             max_tokens=MAX_TOKENS,
             messages=[{"role": "user", "content": f"Fix this malformed JSON. Return ONLY valid JSON:\n\n{text[:4000]}"}],
         )
+
     r2 = claude_with_retry(_repair_call)
     repaired = r2.content[0].text.strip()
     repaired = re.sub(r"^```json\s*", "", repaired)
@@ -1432,8 +1372,12 @@ def fetch_pexels_image(query: str):
     if not data.get("photos"):
         fallback = query.split()[0]
         log.warning(f"No Pexels results for '{query}', retrying '{fallback}'")
-        r = requests.get("https://api.pexels.com/v1/search", headers=hdrs,
-                         params={"query": fallback, "per_page": 5, "orientation": "landscape"}, timeout=20)
+        r = requests.get(
+            "https://api.pexels.com/v1/search",
+            headers=hdrs,
+            params={"query": fallback, "per_page": 5, "orientation": "landscape"},
+            timeout=20
+        )
         data = r.json()
     if not data.get("photos"):
         raise ValueError(f"No Pexels images found for: {query}")
@@ -1449,8 +1393,12 @@ def upload_image(img_bytes, slug, title, photographer):
     if not r.ok:
         raise Exception(f"Image upload failed {r.status_code}: {r.text[:200]}")
     mid = r.json()["id"]
-    requests.post(f"{WP_URL}/wp-json/wp/v2/media/{mid}", headers=HEADERS,
-                  json={"alt_text": title, "caption": f"Photo by {photographer} on Pexels"}, timeout=15)
+    requests.post(
+        f"{WP_URL}/wp-json/wp/v2/media/{mid}",
+        headers=HEADERS,
+        json={"alt_text": title, "caption": f"Photo by {photographer} on Pexels"},
+        timeout=15,
+    )
     return mid
 
 # ============================================================
@@ -1460,8 +1408,12 @@ def upload_image(img_bytes, slug, title, photographer):
 def fetch_wp_categories():
     cat_map, page = {}, 1
     while True:
-        r = requests.get(f"{WP_URL}/wp-json/wp/v2/categories", headers=HEADERS,
-                         params={"per_page": 100, "page": page, "_fields": "id,name"}, timeout=20)
+        r = requests.get(
+            f"{WP_URL}/wp-json/wp/v2/categories",
+            headers=HEADERS,
+            params={"per_page": 100, "page": page, "_fields": "id,name"},
+            timeout=20,
+        )
         if r.status_code == 400 or not r.ok:
             break
         batch = r.json()
@@ -1502,8 +1454,12 @@ def sync_tags(names):
             ids.append(wp_request("POST", "tags", json={"name": name})["id"])
         except Exception:
             try:
-                s = requests.get(f"{WP_URL}/wp-json/wp/v2/tags", headers=HEADERS,
-                                 params={"search": name, "per_page": 1}, timeout=15).json()
+                s = requests.get(
+                    f"{WP_URL}/wp-json/wp/v2/tags",
+                    headers=HEADERS,
+                    params={"search": name, "per_page": 1},
+                    timeout=15,
+                ).json()
                 if s:
                     ids.append(s[0]["id"])
             except Exception:
@@ -1516,10 +1472,18 @@ def sync_tags(names):
 
 def link_translations(en_id: int, de_id: int):
     try:
-        r1 = requests.post(f"{WP_URL}/wp-json/wp/v2/posts/{en_id}", headers=HEADERS,
-                           json={"lang": "en", "translations": {"en": en_id, "de": de_id}}, timeout=15)
-        r2 = requests.post(f"{WP_URL}/wp-json/wp/v2/posts/{de_id}", headers=HEADERS,
-                           json={"lang": "de", "translations": {"en": en_id, "de": de_id}}, timeout=15)
+        r1 = requests.post(
+            f"{WP_URL}/wp-json/wp/v2/posts/{en_id}",
+            headers=HEADERS,
+            json={"lang": "en", "translations": {"en": en_id, "de": de_id}},
+            timeout=15,
+        )
+        r2 = requests.post(
+            f"{WP_URL}/wp-json/wp/v2/posts/{de_id}",
+            headers=HEADERS,
+            json={"lang": "de", "translations": {"en": en_id, "de": de_id}},
+            timeout=15,
+        )
         if r1.ok and r2.ok:
             log.info(f"  Polylang: EN {en_id} ↔ DE {de_id} linked ✓")
             return True
@@ -1577,6 +1541,8 @@ def main():
     manual_row = None
     manual_rows = []
     forced_products = []
+    locked_title_en = None
+    locked_title_de = None
 
     if not args.topic:
         manual_idx, manual_row, manual_rows = get_next_manual_topic()
@@ -1588,6 +1554,7 @@ def main():
 
     if args.topic:
         topic, source = pick_fresh_topic(all_posts, args.topic)
+        locked_title_en = topic
 
     elif manual_row:
         raw_topic = (manual_row.get("topic") or "").strip()
@@ -1613,6 +1580,7 @@ def main():
         source = "manual"
         row_lang = (manual_row.get("language") or "").strip().lower()
         publish_mode = normalize_publish_mode(language_value=row_lang, skip_translate=False)
+        locked_title_en = topic
 
     elif args.manual_only:
         log.info("    No pending manual topics found.")
@@ -1621,9 +1589,18 @@ def main():
     else:
         topic, source = pick_fresh_topic(all_posts, None)
 
+    if locked_title_en and publish_mode in ("de", "both"):
+        log.info("  Translating locked title for DE...")
+        locked_title_de = translate_locked_title_to_german(locked_title_en)
+        log.info(f"  Locked DE title: {locked_title_de}")
+
     log.info(f"    Source : {source}")
     log.info(f"    Topic  : {topic}")
     log.info(f"    Mode   : {publish_mode}")
+    if locked_title_en:
+        log.info(f"    Locked EN title: {locked_title_en}")
+    if locked_title_de:
+        log.info(f"    Locked DE title: {locked_title_de}")
     if forced_products:
         log.info(f"    Manual products: {forced_products}")
 
@@ -1631,7 +1608,7 @@ def main():
     rel_links = resolve_referral_links(topic, forced_products=forced_products)
 
     log.info("[4] Generating English article...")
-    en_article = generate_article_en(topic, rel_links)
+    en_article = generate_article_en(topic, rel_links, locked_title=locked_title_en)
     log.info(f"    Title   : {en_article['title']}")
     log.info(f"    KW      : {en_article.get('focus_keyword', 'N/A')}")
     log.info(f"    Words   : ~{len(en_article.get('content','').split())}")
@@ -1667,7 +1644,11 @@ def main():
     if publish_mode in ("de", "both"):
         log.info("[8] Generating German translation...")
         try:
-            de_article = generate_article_de(en_article, rel_links)
+            de_article = generate_article_de(
+                en_article,
+                rel_links,
+                locked_title_de=locked_title_de,
+            )
             log.info(f"    DE Title : {de_article['title']}")
 
             de_tag_ids = sync_tags(de_article.get("tags", []))
@@ -1683,8 +1664,8 @@ def main():
             if en_post_id and de_post_id:
                 link_translations(en_post_id, de_post_id)
 
-            de_cache_key = f"DE_{en_article.get('slug', 'unknown')}"
-            clear_cached_article(de_cache_key)
+            clear_cached_article(f"DE_{en_article.get('slug', 'unknown')}")
+            clear_cached_article(f"LOCKED_DE_{en_article.get('slug', 'unknown')}")
 
         except Exception as e:
             log.error(f"    German translation failed: {e}")
@@ -1696,6 +1677,8 @@ def main():
         log.info("[8] Skipping German translation/publish.")
 
     clear_cached_article(topic)
+    if locked_title_en:
+        clear_cached_article(f"LOCKED_EN::{topic}")
 
     if source == "manual" and manual_rows and manual_idx is not None and publish_success:
         mark_manual_topic_done(manual_rows, manual_idx)
@@ -1715,8 +1698,6 @@ def main():
     log.info(f"  Image    : {img_url}")
     log.info("=" * 62)
 
-    # Send a short success email at the very end, after all working logic has completed.
-    # This is non-blocking and does not affect publishing if SMTP has an issue.
     success_lines = [
         f"Time   : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"Host   : {socket.gethostname()}",
@@ -1741,7 +1722,6 @@ if __name__ == "__main__":
     try:
         main()
     except Exception:
-        # Send a failure email for unhandled crashes, then re-raise so cron still gets a non-zero exit.
         error_details = traceback.format_exc()
         failure_body = "\n".join([
             f"Time : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
