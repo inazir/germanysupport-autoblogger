@@ -199,9 +199,9 @@ LINK_RELEVANCE = {
 # ============================================================
 #  🔄  MODULE-LEVEL CACHE
 # ============================================================
-_LINK_CACHE: dict  = {}
-_CACHE_TS: float   = 0.0
-_CACHE_TTL: int    = 3600
+_LINK_CACHE: dict = {}
+_CACHE_TS: float = 0.0
+_CACHE_TTL: int = 3600
 
 
 def _normalise_slug(raw_slug: str, wp_base_url: str = "") -> str:
@@ -216,20 +216,16 @@ def _normalise_slug(raw_slug: str, wp_base_url: str = "") -> str:
     """
     s = raw_slug.strip("/").lower()
 
-    # Remove base URL prefix if present
     if wp_base_url:
         base = wp_base_url.rstrip("/").lower()
-        # e.g. https://germanysupport.de/go/n26 → go/n26
         if s.startswith(base.replace("https://", "").replace("http://", "")):
             s = s[len(base.replace("https://", "").replace("http://", "")):].strip("/")
         elif s.startswith(base):
             s = s[len(base):].strip("/")
 
-    # Remove duplicate 'go/go/' prefix
     while s.startswith("go/go/"):
         s = s[3:]
 
-    # Ensure 'go/' prefix
     if not s.startswith("go/"):
         s = f"go/{s}"
 
@@ -257,25 +253,22 @@ def fetch_referral_links(wp_url: str, force: bool = False) -> dict:
     try:
         r = _requests.get(api_url, timeout=15)
         r.raise_for_status()
-        data       = r.json()
-        raw_links  = data.get("links", {})
+        data = r.json()
+        raw_links = data.get("links", {})
         normalised = {}
 
         for raw_slug, target in raw_links.items():
-            # Normalise slug to canonical form
-            slug  = _normalise_slug(raw_slug, wp_url)
+            slug = _normalise_slug(raw_slug, wp_url)
             short = slug.replace("go/", "")
 
-            # Skip excluded products
             if short in EXCLUDED_SLUGS:
                 continue
 
-            # Always expose the public internal redirect URL, never the raw affiliate target
             normalised[slug] = f"{wp_url.rstrip('/')}/{slug}"
 
         if normalised:
             _LINK_CACHE = normalised
-            _CACHE_TS   = now
+            _CACHE_TS = now
             logger.info(f"Fetched {len(normalised)} referral links from WordPress API.")
             return normalised
         else:
@@ -284,26 +277,24 @@ def fetch_referral_links(wp_url: str, force: bool = False) -> dict:
     except Exception as e:
         logger.warning(f"Could not fetch referral links from API: {e}")
 
-    # Fallback to static links
     logger.warning("Using static fallback referral links.")
     fallback = {
         k: v for k, v in STATIC_FALLBACK_LINKS.items()
         if k.replace("go/", "") not in EXCLUDED_SLUGS
     }
     _LINK_CACHE = fallback
-    _CACHE_TS   = now
+    _CACHE_TS = now
     return fallback
 
 
-def get_relevant_links(title: str, content_text: str,
-                       wp_url: str = "", min_links: int = 3) -> dict:
+def get_relevant_links(title: str, content_text: str, wp_url: str = "", min_links: int = 3) -> dict:
     """
     Return relevant affiliate links for an article as {display_name: url}.
     Always uses /go/* links.
     """
     all_links = fetch_referral_links(wp_url) if wp_url else _LINK_CACHE or STATIC_FALLBACK_LINKS
-    combined  = (title + " " + content_text).lower()
-    relevant  = {}
+    combined = (title + " " + content_text).lower()
+    relevant = {}
 
     for slug, keywords in LINK_RELEVANCE.items():
         if slug not in all_links:
@@ -312,7 +303,6 @@ def get_relevant_links(title: str, content_text: str,
             name = SLUG_DISPLAY_NAMES.get(slug, slug)
             relevant[name] = all_links[slug]
 
-    # Ensure minimum
     defaults = ["go/n26", "go/shoop", "go/steuergo"]
     while len(relevant) < min_links:
         for slug in defaults:
@@ -347,6 +337,11 @@ def format_links_for_prompt(relevant_links: dict) -> str:
     return "\n".join(lines)
 
 
+def format_referral_links(relevant_links: dict) -> str:
+    """Backward-compatible alias used by publish_article.py."""
+    return format_links_for_prompt(relevant_links)
+
+
 def format_links_as_html(relevant_links: dict) -> str:
     """HTML <a> tags for Claude prompts."""
     lines = []
@@ -359,6 +354,7 @@ def format_links_as_html(relevant_links: dict) -> str:
                 f'rel="nofollow sponsored">{name}</a>'
             )
     return "\n".join(lines)
+
 
 def build_referral_replacement_map(wp_url: str, force: bool = False) -> dict:
     """
@@ -391,7 +387,6 @@ def build_referral_replacement_map(wp_url: str, force: bool = False) -> dict:
 
             replacement_map[target] = public_url
 
-            # Also add a domain-level fallback for common cases from the same exact plugin link.
             try:
                 from urllib.parse import urlparse
                 parsed = urlparse(target)
