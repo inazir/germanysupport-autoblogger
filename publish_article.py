@@ -41,7 +41,7 @@ import hashlib
 import socket
 import smtplib
 import traceback
-from typing import Optional
+from typing import Optional, List, Tuple
 from difflib import SequenceMatcher
 from datetime import datetime
 from pathlib import Path
@@ -75,12 +75,20 @@ from config import (
     ALLOWED_CATEGORIES,
     get_relevant_links,
     fetch_referral_links,
+    format_referral_links,
     format_links_for_prompt,
     format_links_as_html,
     build_referral_replacement_map,
     TAPTAP_PROMO_TEXT,
     TAPTAP_PROMO_HTML,
 )
+
+# Backward-safe fallback in case format_referral_links is not present in config.py
+try:
+    format_referral_links
+except NameError:
+    def format_referral_links(relevant_links: dict) -> str:
+        return format_links_for_prompt(relevant_links)
 
 # ============================================================
 #  📝  LOGGING
@@ -245,6 +253,179 @@ def enforce_go_links(html: str, wp_base: str) -> tuple:
     html = url_re.sub(replace_bare_url, html)
     return html, replacements
 
+# ============================================================
+#  🔗  PLAIN-TEXT AUTO-LINKER FOR LIVE /go/ LINKS
+# ============================================================
+
+def normalize_slug_for_autolink(value: str) -> str:
+    return re.sub(r"[^a-z0-9-]+", "-", (value or "").strip().lower()).strip("-")
+
+
+def extract_go_slug(url: str, wp_base: str) -> Optional[str]:
+    if not url:
+        return None
+    url = html_lib.unescape(url).strip()
+    m = re.search(r'/go/([a-z0-9-]+)', url, flags=re.IGNORECASE)
+    if m:
+        return m.group(1).lower()
+    if url.startswith("go/"):
+        return url[3:].strip("/").lower()
+    if url.startswith("/go/"):
+        return url[4:].strip("/").lower()
+    return None
+
+
+def slug_to_aliases(slug: str) -> List[str]:
+    slug = normalize_slug_for_autolink(slug)
+    aliases = {
+        slug,
+        slug.replace("-", " "),
+    }
+    return [a for a in aliases if a and len(a) >= 4]
+
+
+def build_autolink_candidates(rel_links: dict, wp_base: str) -> List[Tuple[str, str]]:
+    """
+    Build (visible_text, go_url) candidates.
+
+    Priority:
+    1. names from rel_links passed into the article prompt
+    2. slugs from live referral links fetched from WordPress
+
+    This catches newly added redirects even when topic relevance
+    selection missed them.
+    """
+    candidates: List[Tuple[str, str]] = []
+    seen = set()
+
+    def add_candidate(text: str, go_url: str):
+        text = (text or "").strip()
+        go_url = (go_url or "").strip()
+        if not text or not go_url or "/go/" not in go_url:
+            return
+        key = (text.lower(), go_url.lower())
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append((text, go_url))
+
+    # Current article's explicitly relevant links
+    for name, url in (rel_links or {}).items():
+        slug = extract_go_slug(url, wp_base)
+        if not slug:
+            continue
+        go_url = f"{wp_base.rstrip('/')}/go/{slug}"
+        add_candidate(name, go_url)
+        for alias in slug_to_aliases(slug):
+            add_candidate(alias, go_url)
+
+    # All live WP redirects
+    try:
+        live_links = fetch_referral_links(wp_base, force=False) or {}
+        for key, url in live_links.items():
+            slug = extract_go_slug(key, wp_base) or extract_go_slug(url, wp_base)
+            if not slug:
+                continue
+            go_url = f"{wp_base.rstrip('/')}/go/{slug}"
+            for alias in slug_to_aliases(slug):
+                add_candidate(alias, go_url)
+    except Exception as e:
+        log.warning(f"  Autolink candidate build skipped: {e}")
+
+    # Longer phrases first, so multi-word aliases win before shorter ones
+    candidates.sort(key=lambda x: len(x[0]), reverse=True)
+    return candidates
+
+
+def autolink_plain_text_mentions(
+    html: str,
+    rel_links: dict,
+    wp_base: str,
+    max_total_links: int = 8,
+) -> Tuple[str, int]:
+    """
+    Convert first plain-text mentions outside existing <a> tags into clickable /go/ links.
+    Conservative behavior:
+    - only outside existing anchors
+    - only first plain-text match per slug
+    - skips slugs already linked in the article
+    """
+    if not html:
+        return html, 0
+
+    candidates = build_autolink_candidates(rel_links, wp_base)
+    if not candidates:
+        return html, 0
+
+    total_added = 0
+    updated = html
+
+    linked_slugs = set(
+        m.group(1).lower()
+        for m in re.finditer(r'href=["\'][^"\']*/go/([a-z0-9-]+)["\']', updated, flags=re.IGNORECASE)
+    )
+
+    def replace_outside_anchors(source_html: str, visible_text: str, go_url: str) -> Tuple[str, int]:
+        pattern = re.compile(
+            rf'(?<![\w/-])({re.escape(visible_text)})(?![\w/-])',
+            flags=re.IGNORECASE
+        )
+
+        parts = re.split(r'(<a\b[^>]*>.*?</a>)', source_html, flags=re.IGNORECASE | re.DOTALL)
+        replacements = 0
+        out = []
+
+        tag_splitter = re.compile(r'(<[^>]+>)')
+
+        for part in parts:
+            if not part:
+                out.append(part)
+                continue
+
+            if re.match(r'^<a\b[^>]*>.*?</a>$', part, flags=re.IGNORECASE | re.DOTALL):
+                out.append(part)
+                continue
+
+            subparts = tag_splitter.split(part)
+            new_subparts = []
+
+            for sub in subparts:
+                if not sub:
+                    new_subparts.append(sub)
+                    continue
+
+                if sub.startswith("<") and sub.endswith(">"):
+                    new_subparts.append(sub)
+                    continue
+
+                if replacements == 0:
+                    sub, local_count = pattern.subn(
+                        rf'<a href="{go_url}" target="_blank" rel="nofollow sponsored">\1</a>',
+                        sub,
+                        count=1,
+                    )
+                    replacements += local_count
+
+                new_subparts.append(sub)
+
+            out.append("".join(new_subparts))
+
+        return "".join(out), replacements
+
+    for visible_text, go_url in candidates:
+        slug = extract_go_slug(go_url, wp_base)
+        if not slug or slug in linked_slugs:
+            continue
+        if total_added >= max_total_links:
+            break
+
+        updated, added = replace_outside_anchors(updated, visible_text, go_url)
+        if added:
+            total_added += added
+            linked_slugs.add(slug)
+            log.info(f"  Auto-linked plain mention: '{visible_text}' -> {go_url}")
+
+    return updated, total_added
 
 # ============================================================
 #  💎  HIGH-CONVERSION MONEY PAGES
@@ -1097,7 +1278,14 @@ AFFILIATE LINKS (ALL must appear in content):
                 log.info(f"    {old[:60]} → {new}")
         article["content"] = cleaned
 
-    # Minimal SEO hardening for Rank Math consistency.
+        article["content"], auto_linked_count = autolink_plain_text_mentions(
+            article["content"],
+            rel_links,
+            WP_URL,
+        )
+        if auto_linked_count:
+            log.info(f"  Auto-linked {auto_linked_count} plain-text mention(s) in EN article")
+
     article = normalize_article_seo(article, topic, lang="en")
 
     save_cached_article(topic, article)
@@ -1171,7 +1359,14 @@ AFFILIATE-LINKS (alle müssen im Content erscheinen):
             log.info(f"  Enforced /go/ links (DE): replaced {len(swaps)} direct URL(s)")
         article["content"] = cleaned
 
-    # Minimal SEO hardening for Rank Math consistency.
+        article["content"], auto_linked_count = autolink_plain_text_mentions(
+            article["content"],
+            rel_links,
+            WP_URL,
+        )
+        if auto_linked_count:
+            log.info(f"  Auto-linked {auto_linked_count} plain-text mention(s) in DE article")
+
     article = normalize_article_seo(article, article.get("title") or en_article.get("title", ""), lang="de")
 
     save_cached_article(de_cache_key, article)
