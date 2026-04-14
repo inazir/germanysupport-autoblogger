@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 from social.models import SocialPost
 
@@ -123,12 +123,12 @@ def _hash_name(value: str) -> str:
 
 
 def _make_fallback_background(size: int) -> Image.Image:
-    image = Image.new("RGB", (size, size), (5, 10, 30))
+    image = Image.new("RGB", (size, size), (7, 14, 30))
     draw = ImageDraw.Draw(image, "RGBA")
-    draw.rectangle((0, 0, size, size), fill=(5, 10, 30))
-    draw.ellipse((-200, -120, 780, 700), fill=(22, 56, 120, 60))
-    draw.ellipse((300, 120, 1250, 1080), fill=(10, 96, 180, 40))
-    draw.rectangle((0, 700, size, size), fill=(3, 8, 22, 110))
+    draw.rectangle((0, 0, size, size), fill=(7, 14, 30))
+    draw.ellipse((-200, -120, 780, 700), fill=(44, 88, 180, 60))
+    draw.ellipse((300, 120, 1250, 1080), fill=(30, 120, 220, 40))
+    draw.rectangle((0, 700, size, size), fill=(4, 10, 24, 60))
     return image
 
 
@@ -152,8 +152,8 @@ def _load_background(background_image_path: str | None, size: int) -> Image.Imag
 
 def _add_vertical_gradient_overlay(
     image: Image.Image,
-    top_rgba=(6, 10, 22, 40),
-    bottom_rgba=(4, 8, 18, 220),
+    top_rgba=(8, 14, 28, 2),
+    bottom_rgba=(5, 10, 20, 28),
 ) -> None:
     width, height = image.size
     overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
@@ -171,35 +171,18 @@ def _add_vertical_gradient_overlay(
     image.alpha_composite(overlay)
 
 
-def _add_left_dark_fade(image: Image.Image, max_alpha: int = 65) -> None:
+def _add_left_dark_fade(image: Image.Image, max_alpha: int = 4) -> None:
     width, height = image.size
     overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     px = overlay.load()
 
     for x in range(width):
-        t = min(x / (width * 0.70), 1.0)
+        t = min(x / (width * 0.62), 1.0)
         alpha = int(max_alpha * (1 - t))
         for y in range(height):
             px[x, y] = (0, 0, 0, alpha)
 
     image.alpha_composite(overlay)
-
-
-def _draw_badge(draw: ImageDraw.ImageDraw, text: str, x_right: int, y_top: int, font) -> None:
-    text = _truncate_line((text or "").upper(), 24)
-    bbox = draw.textbbox((0, 0), text, font=font)
-    width = bbox[2] - bbox[0]
-    height = bbox[3] - bbox[1]
-
-    pad_x = 24
-    pad_y = 12
-    x1 = x_right - width - pad_x * 2
-    y1 = y_top
-    x2 = x_right
-    y2 = y_top + height + pad_y * 2
-
-    draw.rounded_rectangle((x1, y1, x2, y2), radius=24, fill=(255, 255, 255, 245))
-    draw.text((x1 + pad_x, y1 + pad_y - 1), text, fill=(29, 78, 216), font=font)
 
 
 def _load_logo(max_w: int = 104, max_h: int = 104) -> Image.Image | None:
@@ -218,7 +201,7 @@ def _load_logo(max_w: int = 104, max_h: int = 104) -> Image.Image | None:
 def _paste_logo(base: Image.Image, logo: Image.Image, x: int, y: int) -> None:
     pad = 12
     w, h = logo.size
-    bg = Image.new("RGBA", (w + pad * 2, h + pad * 2), (255, 255, 255, 238))
+    bg = Image.new("RGBA", (w + pad * 2, h + pad * 2), (255, 255, 255, 220))
 
     mask = Image.new("L", bg.size, 0)
     mask_draw = ImageDraw.Draw(mask)
@@ -254,6 +237,72 @@ def _draw_text_with_shadow(
     )
 
 
+def _add_glass_panel(
+    base: Image.Image,
+    box: tuple[int, int, int, int],
+    *,
+    radius: int = 40,
+    blur_radius: int = 18,
+    fill=(20, 30, 60, 55),
+    edge=(255, 255, 255, 90),
+    highlight_alpha: int = 22,
+) -> None:
+    x1, y1, x2, y2 = box
+    width = x2 - x1
+    height = y2 - y1
+
+    if width <= 0 or height <= 0:
+        return
+
+    crop = base.crop(box)
+    blurred = crop.filter(ImageFilter.GaussianBlur(radius=blur_radius)).convert("RGBA")
+
+    mask = Image.new("L", (width, height), 0)
+    mdraw = ImageDraw.Draw(mask)
+    mdraw.rounded_rectangle((0, 0, width, height), radius=radius, fill=255)
+
+    panel = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    panel.alpha_composite(blurred)
+
+    tint = Image.new("RGBA", (width, height), fill)
+    panel.alpha_composite(tint)
+
+    gradient = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    gpx = gradient.load()
+    for y in range(height):
+        t = y / max(height - 1, 1)
+        alpha = int(10 * (1 - t) + 36 * t)
+        for x in range(width):
+            gpx[x, y] = (10, 18, 40, alpha)
+    panel.alpha_composite(gradient)
+
+    highlight = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    hdraw = ImageDraw.Draw(highlight, "RGBA")
+    hdraw.rectangle(
+        (0, 0, width, int(height * 0.28)),
+        fill=(255, 255, 255, highlight_alpha),
+    )
+    panel.alpha_composite(highlight)
+
+    clipped = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    clipped.paste(panel, (0, 0), mask)
+    base.alpha_composite(clipped, (x1, y1))
+
+    draw = ImageDraw.Draw(base, "RGBA")
+    draw.rounded_rectangle(
+        box,
+        radius=radius,
+        outline=edge,
+        width=1,
+    )
+    draw.rounded_rectangle(
+        (x1 + 1, y1 + 1, x2 - 1, y2 - 1),
+        radius=radius,
+        outline=(255, 255, 255, 24),
+        width=1,
+    )
+
+
 def generate_branded_image(
     post: SocialPost,
     brand_text: str,
@@ -271,15 +320,19 @@ def generate_branded_image(
     bg_path = getattr(post, "background_image_path", None)
 
     image = _load_background(bg_path, size).convert("RGBA")
-    _add_vertical_gradient_overlay(image)
-    _add_left_dark_fade(image)
+    _add_vertical_gradient_overlay(
+        image,
+        top_rgba=(8, 14, 28, 2),
+        bottom_rgba=(5, 10, 20, 28),
+    )
+    _add_left_dark_fade(image, max_alpha=4)
 
     draw = ImageDraw.Draw(image, "RGBA")
 
     draw.rounded_rectangle(
         (44, 44, size - 44, size - 44),
         radius=44,
-        outline=(255, 255, 255, 64),
+        outline=(255, 255, 255, 72),
         width=2,
     )
 
@@ -289,20 +342,19 @@ def generate_branded_image(
     header_left = 66
     header_right = size - 66
 
-    draw.rounded_rectangle(
+    _add_glass_panel(
+        image,
         (header_left, header_top, header_right, header_bottom),
         radius=34,
-        fill=(7, 18, 45, 178),
+        blur_radius=10,
+        fill=(22, 32, 60, 28),
+        edge=(255, 255, 255, 85),
+        highlight_alpha=16,
     )
 
-    draw.rounded_rectangle(
-        (header_left, header_top, header_left + 22, header_bottom),
-        radius=14,
-        fill=(59, 130, 246, 255),
-    )
+    draw = ImageDraw.Draw(image, "RGBA")
 
     brand_font = _font(34, bold=True)
-    badge_font = _font(24, bold=True)
     footer_font = _font(22, bold=False)
     cta_font = _font(26, bold=True)
 
@@ -320,36 +372,32 @@ def generate_branded_image(
         brand_text,
         font=brand_font,
         fill=(255, 255, 255),
-        shadow_fill=(0, 0, 0, 110),
+        shadow_fill=(0, 0, 0, 55),
         shadow_offset=(2, 3),
     )
 
-    badge = (getattr(post, "category_label", None) or getattr(post, "content_type", None) or "ARTICLE").strip()
-    _draw_badge(draw, badge, x_right=size - 98, y_top=94, font=badge_font)
-
-    # Main content panel
+    # Main content panel moved lower
     panel_left = 68
-    panel_top = 420
+    panel_top = 470
     panel_right = size - 68
-    panel_bottom = 950
+    panel_bottom = 980
 
-    draw.rounded_rectangle(
+    _add_glass_panel(
+        image,
         (panel_left, panel_top, panel_right, panel_bottom),
         radius=40,
-        fill=(7, 18, 45, 162),
+        blur_radius=16,
+        fill=(22, 32, 60, 30),
+        edge=(255, 255, 255, 90),
+        highlight_alpha=18,
     )
 
-    draw.rounded_rectangle(
-        (panel_left + 24, panel_top + 28, panel_left + 42, panel_bottom - 28),
-        radius=10,
-        fill=(59, 130, 246, 255),
-    )
+    draw = ImageDraw.Draw(image, "RGBA")
 
-    inner_left = panel_left + 66
-    inner_right = panel_right - 48
+    inner_left = panel_left + 38
+    inner_right = panel_right - 42
     title_max_width = inner_right - inner_left
 
-    # Footer reservation
     footer_height = 110
     footer_y = panel_bottom - footer_height
 
@@ -357,7 +405,7 @@ def generate_branded_image(
 
     title_line_heights = []
     for line in title_lines:
-        bbox = draw.textbbox((0, 0), line, font=title_font, stroke_width=3)
+        bbox = draw.textbbox((0, 0), line, font=title_font, stroke_width=4)
         title_line_heights.append(bbox[3] - bbox[1])
     title_line_gap = 10
     title_block_height = sum(title_line_heights) + title_line_gap * (len(title_lines) - 1)
@@ -382,7 +430,7 @@ def generate_branded_image(
         total_content_height += title_summary_gap + summary_block_height
 
     panel_content_top = panel_top + 52
-    panel_content_bottom = footer_y - 22
+    panel_content_bottom = footer_y - 26
     available_height = panel_content_bottom - panel_content_top
 
     if total_content_height <= available_height:
@@ -390,7 +438,6 @@ def generate_branded_image(
     else:
         start_y = panel_content_top
 
-    # Draw title
     y = start_y
     for i, line in enumerate(title_lines):
         _draw_text_with_shadow(
@@ -399,14 +446,13 @@ def generate_branded_image(
             line,
             font=title_font,
             fill=(255, 255, 255),
-            shadow_fill=(0, 0, 0, 200),
+            shadow_fill=(0, 0, 0, 145),
             shadow_offset=(4, 6),
-            stroke_width=3,
-            stroke_fill=(0, 0, 0, 232),
+            stroke_width=4,
+            stroke_fill=(0, 0, 0, 255),
         )
         y += title_line_heights[i] + (title_line_gap if i < len(title_lines) - 1 else 0)
 
-    # Draw summary
     if summary_font and summary_lines:
         summary_y = y + title_summary_gap
         for i, line in enumerate(summary_lines):
@@ -415,15 +461,14 @@ def generate_branded_image(
                 (inner_left, summary_y),
                 line,
                 font=summary_font,
-                fill=(224, 232, 242),
-                shadow_fill=(0, 0, 0, 145),
+                fill=(238, 243, 250),
+                shadow_fill=(0, 0, 0, 105),
                 shadow_offset=(2, 3),
                 stroke_width=1,
                 stroke_fill=(0, 0, 0, 160),
             )
             summary_y += summary_line_heights[i] + (summary_line_gap if i < len(summary_lines) - 1 else 0)
 
-    # CTA footer
     cta_text = (cta_text or "Read full guide on GermanySupport.de").strip()
     cta_bbox = draw.textbbox((0, 0), cta_text, font=cta_font)
     cta_width = cta_bbox[2] - cta_bbox[0]
@@ -435,13 +480,17 @@ def generate_branded_image(
     cta_box_top = panel_bottom - cta_box_height - 26
     cta_box_bottom = panel_bottom - 26
 
-    draw.rounded_rectangle(
+    _add_glass_panel(
+        image,
         (cta_box_left, cta_box_top, cta_box_right, cta_box_bottom),
         radius=22,
-        fill=(17, 24, 39, 205),
-        outline=(255, 255, 255, 42),
-        width=2,
+        blur_radius=10,
+        fill=(22, 32, 60, 34),
+        edge=(255, 255, 255, 100),
+        highlight_alpha=12,
     )
+
+    draw = ImageDraw.Draw(image, "RGBA")
 
     cta_x = cta_box_left + ((cta_box_right - cta_box_left) - cta_width) // 2
     cta_y = cta_box_top + ((cta_box_bottom - cta_box_top) - cta_height) // 2 - 2
@@ -452,25 +501,26 @@ def generate_branded_image(
         cta_text,
         font=cta_font,
         fill=(255, 255, 255),
-        shadow_fill=(0, 0, 0, 120),
+        shadow_fill=(0, 0, 0, 90),
         shadow_offset=(2, 3),
     )
 
+    # Photo credit moved to bottom-right corner of the full image
     photographer = getattr(post, "background_image_photographer", None)
     if photographer:
         credit = f"Photo: {photographer} / Pexels"
         credit_bbox = draw.textbbox((0, 0), credit, font=footer_font)
         credit_width = credit_bbox[2] - credit_bbox[0]
-        credit_x = panel_right - 44 - credit_width
-        credit_y = cta_box_top - 34
+        credit_x = size - 78 - credit_width
+        credit_y = size - 82
 
         _draw_text_with_shadow(
             draw,
             (credit_x, credit_y),
             credit,
             font=footer_font,
-            fill=(203, 213, 225),
-            shadow_fill=(0, 0, 0, 110),
+            fill=(225, 232, 241),
+            shadow_fill=(0, 0, 0, 90),
             shadow_offset=(1, 2),
         )
 
