@@ -134,14 +134,18 @@ def _normalize_publish_result(publish_result):
         )
 
     remote_post_id = getattr(publish_result, "remote_post_id", None)
+    # Support for your new reel_id field from the mega-post update
+    reel_id = getattr(publish_result, "reel_id", None)
+    
     first_comment_id = (
         getattr(publish_result, "first_comment_id", None)
         or getattr(publish_result, "remote_comment_id", None)
     )
 
-    if remote_post_id:
+    if remote_post_id or reel_id:
         return SimpleNamespace(
-            remote_post_id=remote_post_id,
+            remote_post_id=remote_post_id or reel_id,
+            reel_id=reel_id,
             first_comment_id=first_comment_id,
         )
 
@@ -165,6 +169,13 @@ def _publish_story_if_enabled(post: SocialPost, target: SocialTarget, publisher)
         or getattr(post, "image_url", None)
         or ""
     ).strip() or None
+    
+    # New: Collect video path for video stories
+    video_path = (
+        getattr(post, "generated_video_path", None) 
+        or getattr(post, "video_path", None) 
+        or ""
+    ).strip() or None
 
     print(
         "DEBUG STORY PAYLOAD",
@@ -173,6 +184,7 @@ def _publish_story_if_enabled(post: SocialPost, target: SocialTarget, publisher)
             "platform": target.platform,
             "image_path": image_path,
             "image_url": image_url,
+            "video_path": video_path,
         },
     )
 
@@ -181,7 +193,12 @@ def _publish_story_if_enabled(post: SocialPost, target: SocialTarget, publisher)
             f"Instagram story target '{target.key}' requires SOCIAL_GENERATED_IMAGE_PUBLIC_BASE_URL or another public image_url"
         )
 
-    return publisher.publish_story(post, image_path=image_path, image_url=image_url)
+    return publisher.publish_story(
+        post, 
+        image_path=image_path, 
+        image_url=image_url, 
+        video_path=video_path
+    )
 
 
 def publish_to_targets(
@@ -231,8 +248,13 @@ def publish_to_targets(
                 or getattr(post, "image_url", None)
                 or getattr(post, "generated_image_path", None)
             )
+            
+            # For video-first strategies, we might not strictly require an image if a video exists
+            has_video = bool(
+                getattr(post, "generated_video_path", None) or getattr(post, "video_path", None)
+            )
 
-            if target.require_image and not has_image:
+            if target.require_image and not has_image and not has_video:
                 raise PlatformError(f"Target '{target.key}' requires an image")
 
             if dry_run:
@@ -284,6 +306,7 @@ def publish_to_targets(
                     "target": key,
                     "platform": target.platform,
                     "id": publish_result.remote_post_id,
+                    "reel_id": getattr(publish_result, "reel_id", None),
                     "first_comment_id": publish_result.first_comment_id,
                     "story_id": story_id,
                     "story_error": story_error,

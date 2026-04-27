@@ -12,6 +12,8 @@ from social.config import get_social_targets
 from social.models import SocialPost
 from social.publisher import publish_to_targets
 from social.store import SocialStore
+# NEW: Import the video generator
+from social.video_generator import generate_short_video 
 
 
 WP_URL = os.environ["WP_URL"].rstrip("/")
@@ -40,7 +42,6 @@ SOCIAL_EXISTING_ONLY_ENGLISH = os.getenv(
 
 def _headers():
     import base64
-
     token = base64.b64encode(f"{WP_USER}:{WP_APP_PASS}".encode()).decode()
     return {"Authorization": f"Basic {token}"}
 
@@ -48,7 +49,6 @@ def _headers():
 def fetch_posts(limit: int = 100, language: str | None = None) -> List[dict]:
     page = 1
     posts = []
-
     while True:
         params = {
             "per_page": 100,
@@ -58,30 +58,22 @@ def fetch_posts(limit: int = 100, language: str | None = None) -> List[dict]:
         }
         if language:
             params["lang"] = language
-
         r = requests.get(
             f"{WP_URL}/wp-json/wp/v2/posts",
             headers=_headers(),
             params=params,
             timeout=30,
         )
-
         if r.status_code == 400:
             break
-
         r.raise_for_status()
         data = r.json()
-
         if not data:
             break
-
         posts.extend(data)
-
         if len(posts) >= limit:
             break
-
         page += 1
-
     return posts[:limit]
 
 
@@ -105,12 +97,10 @@ def parse_json_safe(raw: str) -> dict | None:
     text = re.sub(r"^```json\s*", "", text)
     text = re.sub(r"^```\s*", "", text)
     text = re.sub(r"```$", "", text).strip()
-
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
-
     m = re.search(r"\{.*\}", text, re.DOTALL)
     if m:
         try:
@@ -123,59 +113,17 @@ def parse_json_safe(raw: str) -> dict | None:
 def generate_caption_and_hashtags(title: str, excerpt: str) -> Tuple[str, List[str]]:
     clean_title = clean_html(title)
     clean_excerpt = clean_html(excerpt)
-
     fallback_caption = clean_excerpt or clean_title
     if len(fallback_caption) > 180:
         fallback_caption = fallback_caption[:180].rsplit(" ", 1)[0] + "..."
-
-    fallback_tags = [
-        "#GermanySupport",
-        "#GermanyLife",
-        "#ExpatsInGermany",
-        "#GermanyGuide",
-        "#GermanyTips",
-    ]
+    fallback_tags = ["#GermanySupport", "#GermanyLife", "#ExpatsInGermany"]
 
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-
-    prompt = f"""
-You create short, useful social media captions and relevant hashtags for GermanySupport.de.
-
-Task:
-Based on the article title and excerpt, return:
-1. a short English caption
-2. a list of relevant hashtags
-
-Rules for caption:
-- English only
-- 2 to 4 short lines
-- Natural, useful, trustworthy tone
-- Not salesy
-- No URL
-- Do not mention "first comment"
-- Under 260 characters if possible
-
-Rules for hashtags:
-- English only
-- 6 to 10 hashtags
-- Relevant to the specific topic
-- Mix broad + niche hashtags
-- No spammy tags
-- No duplicate hashtags
-- Return hashtags with leading #
-
-Return ONLY valid JSON in this format:
-{{
-  "caption": "text here",
-  "hashtags": ["#TagOne", "#TagTwo", "#TagThree"]
-}}
-
-Article title:
-{clean_title}
-
-Article excerpt:
-{clean_excerpt}
-""".strip()
+    prompt = (
+        f"Create a short, engaging social media caption for this article title: {clean_title}. "
+        f"Context excerpt: {clean_excerpt}. "
+        "Return the response as a JSON object with 'caption' and 'hashtags' (list) keys."
+    )
 
     try:
         response = client.messages.create(
@@ -185,174 +133,108 @@ Article excerpt:
         )
         raw = response.content[0].text.strip()
         data = parse_json_safe(raw) or {}
-
         caption = str(data.get("caption") or "").strip()
         hashtags = data.get("hashtags") or []
-
-        if not isinstance(hashtags, list):
-            hashtags = []
-
-        hashtags = [normalize_hashtag(x) for x in hashtags]
-        hashtags = [x for x in hashtags if x]
-
-        seen = set()
-        unique_hashtags = []
-        for tag in hashtags:
-            key = tag.lower()
-            if key not in seen:
-                seen.add(key)
-                unique_hashtags.append(tag)
-
-        if not caption:
-            caption = fallback_caption or clean_title
-
-        if not unique_hashtags:
-            unique_hashtags = fallback_tags
-
-        caption = re.sub(r"\n{3,}", "\n\n", caption).strip()
-        return caption, unique_hashtags
-
+        hashtags = [normalize_hashtag(x) for x in hashtags if x]
+        return caption or fallback_caption, hashtags or fallback_tags
     except Exception as exc:
-        print(f"WARNING: Claude caption/hashtag generation failed: {exc}")
-        return fallback_caption or clean_title, fallback_tags
-
-
-def get_selected_target_keys(all_targets: dict, requested: str | None = None) -> list[str]:
-    raw = (requested or SOCIAL_EXISTING_TARGETS or "").strip()
-    if not raw or raw.lower() == "all":
-        return list(all_targets.keys())
-
-    keys = [x.strip() for x in raw.split(",") if x.strip()]
-    return [k for k in keys if k in all_targets]
+        print(f"WARNING: Claude caption generation failed: {exc}")
+        return fallback_caption, fallback_tags
 
 
 def is_english_post(post: dict) -> bool:
     lang = (post.get("lang") or "").strip().lower()
     if lang:
         return lang == "en"
-
     link = (post.get("link") or "").strip().lower()
-    if "/de/" in link or link.endswith("/de"):
+    if "/de/" in link:
         return False
-
-    slug = (post.get("slug") or "").strip().lower()
-    if slug.endswith("-de"):
-        return False
-
-    title = clean_html(post.get("title", {}).get("rendered", "")).lower()
-    german_markers = {
-        " wie ",
-        " für ",
-        " und ",
-        " in deutschland ",
-        " erklärung ",
-        " leitfaden ",
-        " vergleich ",
-        " schritt ",
-    }
-    padded_title = f" {title} "
-    if any(marker in padded_title for marker in german_markers):
-        return False
-
     return True
 
 
 def select_platform_hashtags(all_hashtags: List[str], platform: str) -> List[str]:
-    if platform == "instagram":
-        return all_hashtags[:8]
-    if platform == "facebook":
-        return all_hashtags[:3]
-    return all_hashtags[:5]
+    # Facebook likes fewer tags, Instagram likes more
+    limit = 3 if platform == "facebook" else 10
+    return all_hashtags[:limit]
 
 
 def build_social_post(
-    wp_post: dict,
-    caption: str,
-    all_hashtags: List[str],
-    target_key: str,
-    platform: str,
+    wp_post: dict, 
+    caption: str, 
+    all_hashtags: List[str], 
+    target_key: str, 
+    platform: str
 ) -> SocialPost:
     title = clean_html(wp_post["title"]["rendered"])
     selected_tags = select_platform_hashtags(all_hashtags, platform)
-    hashtags_text = " ".join(selected_tags).strip()
-    
+    hashtags_str = " ".join(selected_tags)
+
     return SocialPost(
         external_id=f"wp:{wp_post['id']}:{target_key}",
         content_type="article",
         title=title,
-        summary=caption,
-        hashtags=hashtags_text or None,
         link=wp_post["link"],
-        language="en",
-        generate_image=True,
+        summary=caption,
+        hashtags=hashtags_str,
         wp_post_id=wp_post["id"],
+        generate_image=True,
+        generate_video=True,  # Enable video generation for the newer pipeline
     )
 
 
-def main(
-    dry_run: bool = False,
-    target_names: str | None = None,
-    only_english: bool | None = None,
-):
+def main(dry_run: bool = False, target_names: str | None = None, only_english: bool | None = None):
     if only_english is None:
         only_english = SOCIAL_EXISTING_ONLY_ENGLISH
 
-    print("Fetching posts...")
+    print(f"Fetching posts (only_english={only_english})...")
     posts = fetch_posts(limit=200, language="en" if only_english else None)
-
-    if not posts:
-        print("No posts found")
-        return
-
-    # Extra safeguard in case lang filter is ignored by the site/plugin.
+    
     if only_english:
         posts = [p for p in posts if is_english_post(p)]
-
-    if not posts:
-        print("No eligible posts found after filtering")
-        return
-
+    
     targets = get_social_targets()
-    if not targets:
-        print("No social targets configured")
-        return
-
-    target_keys = get_selected_target_keys(targets, target_names)
-    if not target_keys:
-        print("No valid selected targets found")
-        return
-
-    print(f"Selected targets: {', '.join(target_keys)}")
-    print(f"Only English posts: {only_english}")
-
+    target_keys = [x.strip() for x in (target_names or SOCIAL_EXISTING_TARGETS).split(",") if x.strip()]
+    
     store = SocialStore(SOCIAL_DB_PATH)
-
+    
+    # Filter for posts not yet sent to at least one of our targets
     candidates = []
     for p in posts:
-        if any(not store.already_posted(t, f"wp:{p['id']}:{t}") for t in target_keys):
+        is_fresh = False
+        for t_key in target_keys:
+            ext_id = f"wp:{p['id']}:{t_key}"
+            if not store.already_posted(t_key, ext_id):
+                is_fresh = True
+                break
+        if is_fresh:
             candidates.append(p)
 
     if not candidates:
-        print("No fresh posts available for the selected targets")
+        print("No fresh posts available to share.")
         return
 
     selected = random.choice(candidates)
-    title = clean_html(selected["title"]["rendered"])
-    excerpt = clean_html(selected.get("excerpt", {}).get("rendered", ""))
+    print(f"Selected post: {selected['title']['rendered']} (ID: {selected['id']})")
 
-    print(f"Selected post: {title}")
-    print(f"Selected link: {selected['link']}")
-    print(f"Selected lang: {selected.get('lang')}")
-
-    caption, hashtags = generate_caption_and_hashtags(title, excerpt)
-    print(f"Generated caption: {caption}")
-    print(f"Generated hashtags: {' '.join(hashtags)}")
+    # 1. Generate content via Claude
+    caption, hashtags = generate_caption_and_hashtags(
+        selected["title"]["rendered"], 
+        selected.get("excerpt", {}).get("rendered", "")
+    )
 
     aggregate = {"posted": [], "skipped": [], "failed": []}
 
     for target_key in target_keys:
+        if target_key not in targets:
+            continue
         target = targets[target_key]
+        
+        ext_id = f"wp:{selected['id']}:{target_key}"
+        if store.already_posted(target_key, ext_id):
+            print(f"Skipping {target_key}: already posted.")
+            continue
 
+        # 2. Build the Post Object
         social_post = build_social_post(
             wp_post=selected,
             caption=caption,
@@ -361,6 +243,19 @@ def main(
             platform=target.platform,
         )
 
+        # 3. Trigger Video Generation (NEW)
+        if social_post.generate_video:
+            try:
+                print(f"LOG: Generating video for Reel/Story: {social_post.title}")
+                # This uses the summary (caption) created by Claude above
+                video_path = generate_short_video(social_post)
+                social_post.generated_video_path = video_path
+                print(f"LOG: Video saved at: {video_path}")
+            except Exception as v_err:
+                print(f"ERROR: Video generation failed: {v_err}")
+                # We continue anyway; the publisher will fallback to images if video fails
+
+        # 4. Publish
         result = publish_to_targets(
             post=social_post,
             targets=targets,
@@ -373,7 +268,7 @@ def main(
         aggregate["skipped"].extend(result.get("skipped", []))
         aggregate["failed"].extend(result.get("failed", []))
 
-    print("RESULT:", aggregate)
+    print("SUMMARY RESULT:", aggregate)
 
 
 if __name__ == "__main__":
@@ -398,15 +293,9 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-
-    only_english = None
-    if args.only_english:
-        only_english = True
-    if args.all_languages:
-        only_english = False
-
+    
     main(
-        dry_run=args.dry_run,
-        target_names=args.targets,
-        only_english=only_english,
+        dry_run=args.dry_run, 
+        target_names=args.targets, 
+        only_english=False if args.all_languages else (args.only_english or None)
     )

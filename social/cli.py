@@ -1,3 +1,4 @@
+# social/cli.py
 from __future__ import annotations
 
 import argparse
@@ -30,6 +31,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--generate-image", action="store_true")
     parser.add_argument("--generated-image-public-url")
 
+    # --- Video arguments (added for Reels support) ---
+    # --generate-video: tells publisher.py to attempt video generation
+    #   (not used here — generation happens upstream in share_existing_articles.py
+    #    before this CLI is called, but the flag is kept for forward compatibility)
+    parser.add_argument(
+        "--generate-video",
+        action="store_true",
+        help="Flag: a video was requested for this post",
+    )
+    # --generated-video-path: absolute path to the already-generated .mp4 file.
+    #   share_existing_articles.py generates the video, then passes the path here
+    #   so publisher.py / facebook.py can upload it without regenerating.
+    parser.add_argument(
+        "--generated-video-path",
+        default="",
+        help="Absolute path to a pre-generated video file (mp4)",
+    )
+    # --generated-video-public-url: the public HTTPS URL for the video file,
+    #   constructed from SOCIAL_VIDEO_PUBLIC_BASE_URL in share_existing_articles.py.
+    parser.add_argument(
+        "--generated-video-public-url",
+        default="",
+        help="Public HTTPS URL for the pre-generated video",
+    )
+
     parser.add_argument("--targets", default="all")
     parser.add_argument("--db-path", default="deals_engine/data/deals.sqlite")
     parser.add_argument("--dry-run", action="store_true")
@@ -60,7 +86,11 @@ def main() -> int:
         wp_post_id=args.wp_post_id,
         category_label=args.category_label,
         generate_image=args.generate_image,
-        generated_image_public_url=args.generated_image_public_url,
+        generated_image_public_url=args.generated_image_public_url or None,
+        # Video fields — publisher.py and facebook.py read these off the post object
+        generate_video=args.generate_video,
+        generated_video_path=args.generated_video_path or None,
+        generated_video_public_url=args.generated_video_public_url or None,
     )
 
     store = SocialStore(args.db_path)

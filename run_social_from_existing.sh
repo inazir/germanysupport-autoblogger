@@ -10,9 +10,9 @@ mkdir -p "$LOG_DIR"
 cd "$REPO_DIR"
 
 if [ -f ".env" ]; then
-	  set -a
-	    . ./.env
-	      set +a
+    set -a
+    . ./.env
+    set +a
 fi
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
@@ -22,4 +22,11 @@ export SOCIAL_EXISTING_TARGETS="${SOCIAL_EXISTING_TARGETS:-gs_fb_main,gs_ig_main
 export SOCIAL_EXISTING_ONLY_ENGLISH="${SOCIAL_EXISTING_ONLY_ENGLISH:-true}"
 export SOCIAL_DB_PATH="${SOCIAL_DB_PATH:-social/cache/social.db}"
 
+# --- NEW: Logging Separator and Timestamp ---
+echo "" >> "$LOG_FILE"
+echo "===============================================================================" >> "$LOG_FILE"
+echo "NEW EXECUTION START: $(date '+%Y-%m-%d %H:%M:%S')" >> "$LOG_FILE"
+echo "===============================================================================" >> "$LOG_FILE"
+
+# Execute the script
 "$PYTHON_BIN" social_from_existing.py --only-english "$@" >> "$LOG_FILE" 2>&1
