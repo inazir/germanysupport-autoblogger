@@ -24,6 +24,9 @@ class SocialPost:
     generate_image: bool = False
     generated_image_path: Optional[str] = None
     generated_image_public_url: Optional[str] = None
+    generate_video: bool = False
+    generated_video_path: Optional[str] = None
+    generated_video_public_url: Optional[str] = None
 
 
 @dataclass
@@ -47,3 +50,5 @@ class SocialTarget:
     max_caption_chars: Optional[int] = None
     skip_if_image_generation_fails: bool = False
     publish_story: bool = False
+    publish_video: bool = False
+    skip_if_video_generation_fails: bool = False

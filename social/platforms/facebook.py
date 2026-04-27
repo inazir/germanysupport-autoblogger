@@ -17,9 +17,10 @@ class FacebookPublisher(BasePlatformPublisher):
         endpoint: str,
         data: Dict[str, Any],
         files: Dict[str, Any] | None = None,
+        timeout: int = 60,
     ) -> Dict[str, Any]:
         url = f"https://graph.facebook.com/{self.target.api_version}/{endpoint}"
-        resp = requests.post(url, data=data, files=files, timeout=60)
+        resp = requests.post(url, data=data, files=files, timeout=timeout)
         try:
             payload = resp.json()
         except Exception:
@@ -91,6 +92,31 @@ class FacebookPublisher(BasePlatformPublisher):
             raise PlatformError(f"Facebook photo upload created but no post id returned: {payload}")
         return post_id
 
+    def _create_video_post_from_file(self, post: SocialPost, video_path: str) -> str:
+        if not self.target.page_id:
+            raise PlatformError(f"Target '{self.target.key}' is missing page_id")
+
+        video_path = (video_path or "").strip()
+        if not video_path:
+            raise PlatformError("Facebook video upload requires a non-empty video_path")
+
+        with open(video_path, "rb") as video_file:
+            payload = self._post(
+                f"{self.target.page_id}/videos",
+                {
+                    "published": "true",
+                    "description": self._build_message(post),
+                    "access_token": self.target.access_token,
+                },
+                files={"source": video_file},
+                timeout=300,
+            )
+
+        video_id = str(payload.get("id") or "").strip()
+        if not video_id:
+            raise PlatformError(f"Facebook video upload created but no video id returned: {payload}")
+        return video_id
+
     def _post_first_comment(self, object_id: str, message: str) -> str:
         message = (message or "").strip()
         if not message:
@@ -145,36 +171,36 @@ class FacebookPublisher(BasePlatformPublisher):
         return photo_id
 
     def publish_story(
-            self,
-            post: SocialPost,
-            *,
-            image_path: str | None = None,
-            image_url: str | None = None,
-        ) -> str:
-            if not self.target.page_id:
-                raise PlatformError(f"Target '{self.target.key}' is missing page_id")
-    
-            image_url = self._normalize_public_image_url(image_url or "")
-    
-            if not image_url:
-                raise PlatformError(
-                    f"Facebook story target '{self.target.key}' requires a public image_url. "
-                    f"Set SOCIAL_GENERATED_IMAGE_PUBLIC_BASE_URL so generated images are reachable."
-                )
-    
-            photo_id = self._upload_unpublished_photo_from_url(image_url)
-    
-            payload = self._post(
-                f"{self.target.page_id}/photo_stories",
-                {
-                    "photo_id": photo_id,
-                    "access_token": self.target.access_token,
-                },
+        self,
+        post: SocialPost,
+        *,
+        image_path: str | None = None,
+        image_url: str | None = None,
+    ) -> str:
+        if not self.target.page_id:
+            raise PlatformError(f"Target '{self.target.key}' is missing page_id")
+
+        image_url = self._normalize_public_image_url(image_url or "")
+
+        if not image_url:
+            raise PlatformError(
+                f"Facebook story target '{self.target.key}' requires a public image_url. "
+                f"Set SOCIAL_GENERATED_IMAGE_PUBLIC_BASE_URL so generated images are reachable."
             )
-            story_id = str(payload.get("id") or "").strip()
-            if not story_id:
-                raise PlatformError(f"Facebook story created but no id returned: {payload}")
-            return story_id
+
+        photo_id = self._upload_unpublished_photo_from_url(image_url)
+
+        payload = self._post(
+            f"{self.target.page_id}/photo_stories",
+            {
+                "photo_id": photo_id,
+                "access_token": self.target.access_token,
+            },
+        )
+        story_id = str(payload.get("id") or "").strip()
+        if not story_id:
+            raise PlatformError(f"Facebook story created but no id returned: {payload}")
+        return story_id
 
     def publish(self, post: SocialPost):
         if not self.target.page_id:
@@ -187,10 +213,13 @@ class FacebookPublisher(BasePlatformPublisher):
             getattr(self.target, "comment_fail_is_fatal", False)
         )
 
+        video_path = (getattr(post, "generated_video_path", "") or getattr(post, "video_path", "") or "").strip()
         image_url = self._normalize_public_image_url(getattr(post, "image_url", "") or "")
         generated_image_path = (getattr(post, "generated_image_path", "") or "").strip()
 
-        if image_url:
+        if video_path:
+            fb_post_id = self._create_video_post_from_file(post, video_path)
+        elif image_url:
             fb_post_id = self._create_photo_post_from_url(post, image_url)
         elif generated_image_path:
             fb_post_id = self._create_photo_post_from_file(post, generated_image_path)
