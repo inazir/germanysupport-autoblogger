@@ -314,30 +314,18 @@ class FacebookPublisher(BasePlatformPublisher):
         image_url: str | None = None,
         video_path: str | None = None,
     ) -> str:
-        """
-        Publishes to Facebook Stories. 
-        If video_path is provided, it tries to post a video story. 
-        Otherwise, falls back to image.
-        """
         if not self.target.page_id:
             raise PlatformError(f"Target '{self.target.key}' is missing page_id")
 
-        # --- OPTION A: VIDEO STORY ---
+        # --- PREFER VIDEO STORY ---
         if video_path and os.path.exists(video_path):
             try:
-                print(f"INFO: Attempting Video Story for {video_path}")
-                # Note: Facebook often uses the same Reels logic or a specific /video_stories endpoint.
-                # If your API version supports it, we reuse the unpublished photo pattern for video:
-                payload = self._post(
-                    f"{self.target.page_id}/video_stories",
-                    {"access_token": self.target.access_token},
-                    files={"video_file": open(video_path, "rb")}
-                )
-                return str(payload.get("id") or payload.get("post_id", "video_story_success"))
+                print(f"INFO: Starting 3-step video story upload for {video_path}")
+                return self._upload_video_story(video_path)
             except Exception as ve:
                 print(f"WARNING: Video story failed ({ve}), falling back to image story.")
 
-        # --- OPTION B: IMAGE STORY (EXISTING LOGIC + ID FIX) ---
+        # --- FALLBACK TO IMAGE STORY ---
         image_url = self._normalize_public_image_url(image_url or "")
         if not image_url:
             raise PlatformError("Facebook story requires a public image_url.")
@@ -345,23 +333,53 @@ class FacebookPublisher(BasePlatformPublisher):
         photo_id = self._upload_unpublished_photo_from_url(image_url)
         payload = self._post(
             f"{self.target.page_id}/photo_stories",
-            {
-                "photo_id": photo_id,
-                "access_token": self.target.access_token,
-            },
+            {"photo_id": photo_id, "access_token": self.target.access_token},
         )
         
-        # FIX: Check for both 'id' and 'post_id' (Facebook returns different ones)
         story_id = str(payload.get("id") or payload.get("post_id") or "").strip()
+        if not story_id and payload.get("success"):
+            return "success_confirmed"
         
-        if not story_id and payload.get("success") is True:
-            story_id = "success_confirmed" # Fallback if FB returns success:True without ID
-
         if not story_id:
-            raise PlatformError(f"Facebook story created but no id returned: {payload}")
-            
+            raise PlatformError(f"Photo story failed: {payload}")
         return story_id
 
+    def _upload_video_story(self, video_path: str) -> str:
+        """Handles the 3-step resumable upload for FB Video Stories."""
+        # Step 1: Initialize session
+        init_res = self._post(f"{self.target.page_id}/video_stories", {
+            "upload_phase": "start",
+            "access_token": self.target.access_token
+        })
+        video_id = init_res.get("video_id")
+        upload_url = init_res.get("upload_url")
+
+        # Step 2: Upload binary data
+        file_size = os.path.getsize(video_path)
+        with open(video_path, "rb") as f:
+            binary_data = f.read()
+            
+        headers = {
+            "Authorization": f"OAuth {self.target.access_token}",
+            "offset": "0",
+            "file_size": str(file_size),
+            "Content-Type": "application/octet-stream"
+        }
+        # Step 2 uses a direct PUT/POST to the upload_url returned in Step 1
+        resp = requests.post(upload_url, headers=headers, data=binary_data, timeout=120)
+        if not resp.ok:
+            raise PlatformError(f"Video story binary upload failed: {resp.text}")
+
+        # Step 3: Finish/Publish
+        finish_res = self._post(f"{self.target.page_id}/video_stories", {
+            "upload_phase": "finish",
+            "video_id": video_id,
+            "access_token": self.target.access_token
+        })
+        
+        if finish_res.get("success"):
+            return str(video_id)
+        raise PlatformError(f"Video story finish phase failed: {finish_res}")
     # ------------------------------------------------------------------
     # publish()  –  main entry point called by publisher.py
     #
