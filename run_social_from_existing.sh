@@ -22,11 +22,31 @@ export SOCIAL_EXISTING_TARGETS="${SOCIAL_EXISTING_TARGETS:-gs_fb_main,gs_ig_main
 export SOCIAL_EXISTING_ONLY_ENGLISH="${SOCIAL_EXISTING_ONLY_ENGLISH:-true}"
 export SOCIAL_DB_PATH="${SOCIAL_DB_PATH:-social/cache/social.db}"
 
-# --- NEW: Logging Separator and Timestamp ---
+# --- Logging Separator and Timestamp ---
 echo "" >> "$LOG_FILE"
 echo "===============================================================================" >> "$LOG_FILE"
 echo "NEW EXECUTION START: $(date '+%Y-%m-%d %H:%M:%S')" >> "$LOG_FILE"
 echo "===============================================================================" >> "$LOG_FILE"
 
-# Execute the script
+# 1. Execute the Social Script
 "$PYTHON_BIN" social_from_existing.py --only-english "$@" >> "$LOG_FILE" 2>&1
+
+# 2. Cache Cleanup (NEW)
+# This deletes files and folders older than 7 days in your cache directories
+echo "LOG: Starting cache cleanup (older than 7 days)..." >> "$LOG_FILE"
+
+CACHE_DIRS=(
+    "$REPO_DIR/social/cache/generated_images"
+    "$REPO_DIR/social/cache/generated_videos"
+)
+
+for DIR in "${CACHE_DIRS[@]}"; do
+    if [ -d "$DIR" ]; then
+        # -mindepth 1: Don't delete the main folder itself
+        # -mtime +7:  Only items modified more than 7 days ago
+        # -exec rm -rf: Force delete files or subdirectories
+        find "$DIR" -mindepth 1 -mtime +7 -exec rm -rf {} + >> "$LOG_FILE" 2>&1
+    fi
+done
+
+echo "LOG: Cleanup finished." >> "$LOG_FILE"

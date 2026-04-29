@@ -1,7 +1,7 @@
 # social/video_generator.py
 from __future__ import annotations
 
-import anthropic
+from openai import OpenAI
 import os
 import re
 import subprocess
@@ -127,69 +127,39 @@ def _fetch_pexels_backgrounds(query: str, count: int, out_dir: Path) -> List[Pat
     return paths
 
 # ---------------------------------------------------------------------------
-# Scene text generation via Anthropic
+# Scene text generation via Deepseek
 # ---------------------------------------------------------------------------
 
 def _build_scenes(post: SocialPost) -> List[str]:
-    """Uses AI to generate plain-text social media hooks—strictly no emojis."""
-    
-    cheap_model = os.getenv("CHEAP_ANTHROPIC_MODEL", "claude-3-haiku-20240307")
-    api_key = os.getenv("ANTHROPIC_KEY")
-    
-    if not api_key:
-        print("WARNING: No Anthropic key found. Falling back to basic scenes.")
-        return [post.title, post.summary[:100], "Visit GermanySupport.de"]
-
-    client = anthropic.Anthropic(api_key=api_key)
+    # Initialize DeepSeek Client
+    api_key = os.getenv("DEEPSEEK_API_KEY")
+    client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
     
     prompt = f"""
-    You are a social media expert for 'GermanySupport.de'.
-    Create text for a 20-second video based on this article.
-    
+    Create text for a 20-second video.
     TITLE: {post.title}
     SUMMARY: {post.summary}
     
     REQUIREMENTS:
-    1. Line 1: Catchy Hook.
-    2. Lines 2-4: Key Value Points.
-    3. Line 5: Call to Action.
-    4. Language: Must match the article language.
-    5. Length: Keep every line under 75 characters.
-    6. STRICTLY NO EMOJIS. Use only plain text.
-    
-    RETURN ONLY the 5 lines of text. No labels, no quotes, and NO EMOJIS.
+    1. 5 lines total: Hook, 3 Value Points, 1 CTA.
+    2. Language: {post.language}
+    3. Strictly NO EMOJIS.
+    4. Each line under 75 characters.
     """
 
     try:
-        response = client.messages.create(
-            model=cheap_model,
-            max_tokens=300,
-            temperature=0.4,
+        response = client.chat.completions.create(
+            model="deepseek-v4-pro",
             messages=[{"role": "user", "content": prompt}]
         )
+        raw_text = response.choices[0].message.content
+        lines = [line.strip().strip("•-* ") for line in raw_text.split('\n') if line.strip()]
         
-        raw_text = response.content[0].text
-        
-        # Strip out emojis/special characters that mess up gTTS
-        clean_text = re.sub(r'[^\w\s\d\.\,\!\?\-\:\•\']', '', raw_text)
-        
-        # Parse into lines
-        lines = [line.strip().strip("•-* ") for line in clean_text.split('\n') if line.strip()]
-        
-        final_scenes = []
-        for i, line in enumerate(lines):
-            if i == 0: # Hook
-                final_scenes.append(line)
-            elif i < len(lines) - 1: # Value Points
-                final_scenes.append(f"• {line}")
-            else: # CTA
-                final_scenes.append(line)
-        
-        return final_scenes[:6] if final_scenes else [post.title, "Visit GermanySupport.de"]
-
+        # Ensure we have a clean list for the video frames
+        return lines[:5]
     except Exception as e:
-        print(f"ERROR: AI Text Generation failed: {e}")
-        return [post.title, "Check out our latest guide!", "Link in bio or comments"]
+        print(f"ERROR: DeepSeek Video Text Generation failed: {e}")
+        return [post.title, "Check out our latest guide!", "Link in bio"]
 
 # ---------------------------------------------------------------------------
 # Single-frame renderer

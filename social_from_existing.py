@@ -5,29 +5,30 @@ import os
 import random
 import re
 import requests
-import anthropic
+from openai import OpenAI
 from typing import List, Tuple
 
 from social.config import get_social_targets
 from social.models import SocialPost
 from social.publisher import publish_to_targets
 from social.store import SocialStore
-# NEW: Import the video generator
 from social.video_generator import generate_short_video 
 
 
+# --- Configuration & Environment ---
 WP_URL = os.environ["WP_URL"].rstrip("/")
 WP_USER = os.environ["WP_USER"]
 WP_APP_PASS = os.environ["WP_APP_PASS"]
-ANTHROPIC_KEY = os.environ["ANTHROPIC_KEY"]
 
-SOCIAL_DB_PATH = os.getenv(
-    "SOCIAL_DB_PATH",
-    "social/cache/social.db",
-)
+# DeepSeek Configuration (Social & Video Engine)
+DEEPSEEK_KEY = os.environ["DEEPSEEK_API_KEY"]
+DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro")
+DEEPSEEK_MAX_TOKENS = int(os.getenv("SOCIAL_CAPTION_MAX_TOKENS", "320"))
 
-CLAUDE_MODEL = os.getenv("SOCIAL_CAPTION_MODEL", "claude-sonnet-4-20250514")
-CLAUDE_MAX_TOKENS = int(os.getenv("SOCIAL_CAPTION_MAX_TOKENS", "320"))
+# Initialize DeepSeek Client once (Uses OpenAI-compatible library)
+client = OpenAI(api_key=DEEPSEEK_KEY, base_url="https://api.deepseek.com")
+
+SOCIAL_DB_PATH = os.getenv("SOCIAL_DB_PATH", "social/cache/social.db")
 
 SOCIAL_EXISTING_TARGETS = os.getenv(
     "SOCIAL_EXISTING_TARGETS",
@@ -39,6 +40,8 @@ SOCIAL_EXISTING_ONLY_ENGLISH = os.getenv(
     "true",
 ).strip().lower() in {"1", "true", "yes", "on"}
 
+
+# --- Helper Functions ---
 
 def _headers():
     import base64
@@ -84,62 +87,37 @@ def clean_html(text: str) -> str:
 
 def normalize_hashtag(tag: str) -> str:
     tag = (tag or "").strip()
-    if not tag:
-        return ""
-    if not tag.startswith("#"):
-        tag = f"#{tag}"
+    if not tag: return ""
+    if not tag.startswith("#"): tag = f"#{tag}"
     tag = re.sub(r"[^#A-Za-z0-9_]", "", tag)
     return tag
 
 
-def parse_json_safe(raw: str) -> dict | None:
-    text = raw.strip()
-    text = re.sub(r"^```json\s*", "", text)
-    text = re.sub(r"^```\s*", "", text)
-    text = re.sub(r"```$", "", text).strip()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-    m = re.search(r"\{.*\}", text, re.DOTALL)
-    if m:
-        try:
-            return json.loads(m.group(0))
-        except json.JSONDecodeError:
-            return None
-    return None
-
-
 def generate_caption_and_hashtags(title: str, excerpt: str) -> Tuple[str, List[str]]:
+    """Uses DeepSeek-V4-Pro to generate high-speed, low-cost social media content."""
     clean_title = clean_html(title)
     clean_excerpt = clean_html(excerpt)
-    fallback_caption = clean_excerpt or clean_title
-    if len(fallback_caption) > 180:
-        fallback_caption = fallback_caption[:180].rsplit(" ", 1)[0] + "..."
-    fallback_tags = ["#GermanySupport", "#GermanyLife", "#ExpatsInGermany"]
-
-    client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+    
     prompt = (
-        f"Create a short, engaging social media caption for this article title: {clean_title}. "
-        f"Context excerpt: {clean_excerpt}. "
-        "Return the response as a JSON object with 'caption' and 'hashtags' (list) keys."
+        f"Create a short, engaging social media caption for this article: {clean_title}. "
+        f"Context: {clean_excerpt}. "
+        "Return a JSON object with 'caption' (string) and 'hashtags' (list of strings)."
     )
 
     try:
-        response = client.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=CLAUDE_MAX_TOKENS,
+        response = client.chat.completions.create(
+            model=DEEPSEEK_MODEL,
             messages=[{"role": "user", "content": prompt}],
+            response_format={'type': 'json_object'},
+            max_tokens=DEEPSEEK_MAX_TOKENS
         )
-        raw = response.content[0].text.strip()
-        data = parse_json_safe(raw) or {}
+        data = json.loads(response.choices[0].message.content)
         caption = str(data.get("caption") or "").strip()
-        hashtags = data.get("hashtags") or []
-        hashtags = [normalize_hashtag(x) for x in hashtags if x]
-        return caption or fallback_caption, hashtags or fallback_tags
+        hashtags = [normalize_hashtag(x) for x in data.get("hashtags", []) if x]
+        return caption, hashtags
     except Exception as exc:
-        print(f"WARNING: Claude caption generation failed: {exc}")
-        return fallback_caption, fallback_tags
+        print(f"WARNING: DeepSeek caption generation failed: {exc}")
+        return clean_title, ["#GermanySupport"]
 
 
 def is_english_post(post: dict) -> bool:
@@ -147,24 +125,16 @@ def is_english_post(post: dict) -> bool:
     if lang:
         return lang == "en"
     link = (post.get("link") or "").strip().lower()
-    if "/de/" in link:
-        return False
-    return True
+    return "/de/" not in link
 
 
 def select_platform_hashtags(all_hashtags: List[str], platform: str) -> List[str]:
-    # Facebook likes fewer tags, Instagram likes more
+    # Custom limits per platform
     limit = 3 if platform == "facebook" else 10
     return all_hashtags[:limit]
 
 
-def build_social_post(
-    wp_post: dict, 
-    caption: str, 
-    all_hashtags: List[str], 
-    target_key: str, 
-    platform: str
-) -> SocialPost:
+def build_social_post(wp_post: dict, caption: str, all_hashtags: List[str], target_key: str, platform: str) -> SocialPost:
     title = clean_html(wp_post["title"]["rendered"])
     selected_tags = select_platform_hashtags(all_hashtags, platform)
     hashtags_str = " ".join(selected_tags)
@@ -178,7 +148,7 @@ def build_social_post(
         hashtags=hashtags_str,
         wp_post_id=wp_post["id"],
         generate_image=True,
-        generate_video=True,  # Enable video generation for the newer pipeline
+        generate_video=True, 
     )
 
 
@@ -197,7 +167,6 @@ def main(dry_run: bool = False, target_names: str | None = None, only_english: b
     
     store = SocialStore(SOCIAL_DB_PATH)
     
-    # Filter for posts not yet sent to at least one of our targets
     candidates = []
     for p in posts:
         is_fresh = False
@@ -206,8 +175,7 @@ def main(dry_run: bool = False, target_names: str | None = None, only_english: b
             if not store.already_posted(t_key, ext_id):
                 is_fresh = True
                 break
-        if is_fresh:
-            candidates.append(p)
+        if is_fresh: candidates.append(p)
 
     if not candidates:
         print("No fresh posts available to share.")
@@ -216,7 +184,7 @@ def main(dry_run: bool = False, target_names: str | None = None, only_english: b
     selected = random.choice(candidates)
     print(f"Selected post: {selected['title']['rendered']} (ID: {selected['id']})")
 
-    # 1. Generate content via Claude
+    # 1. Generate content via DeepSeek (Saving budget here)
     caption, hashtags = generate_caption_and_hashtags(
         selected["title"]["rendered"], 
         selected.get("excerpt", {}).get("rendered", "")
@@ -225,8 +193,7 @@ def main(dry_run: bool = False, target_names: str | None = None, only_english: b
     aggregate = {"posted": [], "skipped": [], "failed": []}
 
     for target_key in target_keys:
-        if target_key not in targets:
-            continue
+        if target_key not in targets: continue
         target = targets[target_key]
         
         ext_id = f"wp:{selected['id']}:{target_key}"
@@ -243,17 +210,15 @@ def main(dry_run: bool = False, target_names: str | None = None, only_english: b
             platform=target.platform,
         )
 
-        # 3. Trigger Video Generation (NEW)
+        # 3. Trigger Video Generation
         if social_post.generate_video:
             try:
                 print(f"LOG: Generating video for Reel/Story: {social_post.title}")
-                # This uses the summary (caption) created by Claude above
                 video_path = generate_short_video(social_post)
                 social_post.generated_video_path = video_path
                 print(f"LOG: Video saved at: {video_path}")
             except Exception as v_err:
                 print(f"ERROR: Video generation failed: {v_err}")
-                # We continue anyway; the publisher will fallback to images if video fails
 
         # 4. Publish
         result = publish_to_targets(
@@ -276,21 +241,9 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument(
-        "--targets",
-        default=None,
-        help='Comma-separated targets, e.g. "gs_fb_main,gs_ig_main"',
-    )
-    parser.add_argument(
-        "--only-english",
-        action="store_true",
-        help="Only pick English posts",
-    )
-    parser.add_argument(
-        "--all-languages",
-        action="store_true",
-        help="Allow posts of any language",
-    )
+    parser.add_argument("--targets", default=None)
+    parser.add_argument("--only-english", action="store_true")
+    parser.add_argument("--all-languages", action="store_true")
 
     args = parser.parse_args()
     
