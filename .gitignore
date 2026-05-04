@@ -3,3 +3,4 @@ cache/
 logs/
 __pycache__/
 *.pyc
+social/assets/background-music/
