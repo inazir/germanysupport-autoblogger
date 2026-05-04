@@ -11,8 +11,8 @@ from typing import List, Optional
 
 import requests
 from PIL import Image, ImageDraw
-from gtts import gTTS
-from langdetect import detect
+import asyncio
+import edge_tts
 
 from social.models import SocialPost
 from social.image_builder import (
@@ -59,25 +59,35 @@ def _get_audio_duration(file_path: Path) -> float:
         return 20.0 # Fallback
 
 def _generate_voiceover(scenes: List[str], out_dir: Path) -> Path:
-    """Creates a free voice-over with auto-language detection and cleaning."""
-    # We join scenes with a slight pause (period) for more natural TTS
     full_text = ". ".join(scenes)
-    
-    # 1. Detect language (en, de, etc.)
-    try:
-        lang = detect(full_text)
-        print(f"INFO: Detected language for voice-over: {lang}")
-    except:
-        lang = 'en' # Fallback to English
-    
-    # 2. Clean text for better speech (Remove URLs, fix brand pronunciation)
+
     clean_text = re.sub(r'https?://\S+', '', full_text)
     clean_text = clean_text.replace("GermanySupport.de", "Germany Support dot de")
-    
-    # 3. Generate Speech
-    tts = gTTS(text=clean_text, lang=lang) 
+
+    voices = [
+        "en-US-AriaNeural",
+        "en-US-JennyNeural",
+        "en-GB-SoniaNeural",
+        "en-AU-NatashaNeural",
+        "en-US-GuyNeural",
+    ]
+
+    voice = random.choice(voices)
+    print(f"INFO: Selected voice: {voice}")
+
     audio_path = out_dir / "voiceover.mp3"
-    tts.save(str(audio_path))
+
+    async def _run():
+        communicate = edge_tts.Communicate(
+            text=clean_text,
+            voice=voice,
+            rate="+8%",
+            volume="+0%"
+        )
+        await communicate.save(str(audio_path))
+
+    asyncio.run(_run())
+
     return audio_path
 
 def _get_random_music() -> Optional[Path]:
@@ -129,37 +139,70 @@ def _fetch_pexels_backgrounds(query: str, count: int, out_dir: Path) -> List[Pat
 # ---------------------------------------------------------------------------
 # Scene text generation via Deepseek
 # ---------------------------------------------------------------------------
-
 def _build_scenes(post: SocialPost) -> List[str]:
     # Initialize DeepSeek Client
     api_key = os.getenv("DEEPSEEK_API_KEY")
     client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
-    
+
     prompt = f"""
-    Create text for a 20-second video.
-    TITLE: {post.title}
-    SUMMARY: {post.summary}
-    
-    REQUIREMENTS:
-    1. 5 lines total: Hook, 3 Value Points, 1 CTA.
-    2. Language: {post.language}
-    3. Strictly NO EMOJIS.
-    4. Each line under 75 characters.
-    """
+Create text for a 20-second social media video.
+
+TITLE: {post.title}
+SUMMARY: {post.summary}
+
+REQUIREMENTS:
+1. Output language MUST be English only.
+2. Rewrite any German content into natural English.
+3. 5 lines total exactly:
+   - Line 1 = Strong scroll-stopping Hook
+   - Line 2 = Important useful point
+   - Line 3 = Surprising / money-saving / helpful point
+   - Line 4 = Actionable takeaway or warning
+   - Line 5 = Call To Action
+4. Each line max 75 characters.
+5. Strictly NO emojis.
+6. Strictly NO bullet points.
+7. Strictly NO numbering.
+8. Use short clear spoken language.
+9. Make it highly engaging for Facebook / Instagram reels.
+10. Hook should create curiosity instantly.
+11. Use urgency when relevant (new rules, changes, deadlines, costs).
+12. Encourage likes/comments/shares naturally.
+13. Tone should feel helpful, smart, trustworthy.
+"""
 
     try:
         response = client.chat.completions.create(
             model="deepseek-v4-pro",
-            messages=[{"role": "user", "content": prompt}]
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.8
         )
-        raw_text = response.choices[0].message.content
-        lines = [line.strip().strip("•-* ") for line in raw_text.split('\n') if line.strip()]
-        
-        # Ensure we have a clean list for the video frames
-        return lines[:5]
+
+        raw_text = response.choices[0].message.content.strip()
+
+        lines = [
+            line.strip().strip("•-*1234567890. ")
+            for line in raw_text.split("\n")
+            if line.strip()
+        ]
+
+        # Force exactly 5 lines
+        lines = lines[:5]
+
+        while len(lines) < 5:
+            lines.append("Visit GermanySupport.de")
+
+        return lines
+
     except Exception as e:
         print(f"ERROR: DeepSeek Video Text Generation failed: {e}")
-        return [post.title, "Check out our latest guide!", "Link in bio"]
+        return [
+            "Important Germany update",
+            "New rules may affect you",
+            "Check latest details now",
+            "Simple guide available",
+            "Visit GermanySupport.de"
+        ]
 
 # ---------------------------------------------------------------------------
 # Single-frame renderer
