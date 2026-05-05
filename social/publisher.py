@@ -40,6 +40,15 @@ def _build_generated_image_public_url(output_path: str | os.PathLike[str]) -> st
     return f"{public_base}/{file_name}"
 
 
+def _build_generated_video_public_url(video_path: str | os.PathLike[str]) -> str | None:
+    public_base = os.getenv("SOCIAL_GENERATED_VIDEO_PUBLIC_BASE_URL", "").strip().rstrip("/")
+    if not public_base:
+        return None
+
+    file_name = Path(video_path).name
+    return f"{public_base}/generated_videos/{file_name}"
+
+
 def _ensure_background_image(post: SocialPost, target: SocialTarget) -> None:
     if getattr(post, "background_image_path", None):
         return
@@ -70,7 +79,6 @@ def _prepare_generated_image(post: SocialPost, target: SocialTarget) -> None:
 
     _ensure_background_image(post, target)
 
-    # Feed image
     existing_path = (getattr(post, "generated_image_path", None) or "").strip()
     if existing_path and Path(existing_path).exists():
         if not getattr(post, "generated_image_public_url", None):
@@ -88,7 +96,6 @@ def _prepare_generated_image(post: SocialPost, target: SocialTarget) -> None:
     if getattr(post, "generated_image_public_url", None):
         post.image_url = post.generated_image_public_url
 
-    # Story image
     if getattr(target, "publish_story", False):
         story_path = (getattr(post, "story_generated_image_path", None) or "").strip()
         if story_path and Path(story_path).exists():
@@ -119,10 +126,7 @@ def _prepare_generated_image(post: SocialPost, target: SocialTarget) -> None:
 
 def _normalize_publish_result(publish_result):
     if isinstance(publish_result, str):
-        return SimpleNamespace(
-            remote_post_id=publish_result,
-            first_comment_id=None,
-        )
+        return SimpleNamespace(remote_post_id=publish_result, first_comment_id=None)
 
     if isinstance(publish_result, dict):
         return SimpleNamespace(
@@ -134,9 +138,8 @@ def _normalize_publish_result(publish_result):
         )
 
     remote_post_id = getattr(publish_result, "remote_post_id", None)
-    # Support for your new reel_id field from the mega-post update
     reel_id = getattr(publish_result, "reel_id", None)
-    
+
     first_comment_id = (
         getattr(publish_result, "first_comment_id", None)
         or getattr(publish_result, "remote_comment_id", None)
@@ -149,12 +152,27 @@ def _normalize_publish_result(publish_result):
             first_comment_id=first_comment_id,
         )
 
-    raise PlatformError(
-        f"Unsupported publish result type from platform publisher: {type(publish_result).__name__}"
-    )
+    raise PlatformError(f"Unsupported publish result type: {type(publish_result).__name__}")
 
 
-def _publish_story_if_enabled(post: SocialPost, target: SocialTarget, publisher) -> str | None:
+def _get_video_url(post: SocialPost) -> str | None:
+    video_url = getattr(post, "generated_video_url", None) or getattr(post, "video_url", None)
+    if video_url:
+        return video_url
+
+    video_path = getattr(post, "generated_video_path", None) or getattr(post, "video_path", None)
+    if not video_path:
+        return None
+
+    public_base = os.getenv("SOCIAL_GENERATED_VIDEO_PUBLIC_BASE_URL", "").strip().rstrip("/")
+    if not public_base:
+        return None
+
+    file_name = Path(video_path).name
+    return f"{public_base}/generated_videos/{file_name}"
+
+
+def _publish_story_if_enabled(post: SocialPost, target: SocialTarget, publisher):
     if not getattr(target, "publish_story", False):
         return None
 
@@ -163,17 +181,11 @@ def _publish_story_if_enabled(post: SocialPost, target: SocialTarget, publisher)
         or getattr(post, "generated_image_path", None)
         or ""
     ).strip() or None
+
     image_url = (
         getattr(post, "story_generated_image_public_url", None)
         or getattr(post, "generated_image_public_url", None)
         or getattr(post, "image_url", None)
-        or ""
-    ).strip() or None
-    
-    # New: Collect video path for video stories
-    video_path = (
-        getattr(post, "generated_video_path", None) 
-        or getattr(post, "video_path", None) 
         or ""
     ).strip() or None
 
@@ -184,20 +196,23 @@ def _publish_story_if_enabled(post: SocialPost, target: SocialTarget, publisher)
             "platform": target.platform,
             "image_path": image_path,
             "image_url": image_url,
-            "video_path": video_path,
         },
     )
 
-    if target.platform == "instagram" and not image_url:
-        raise PlatformError(
-            f"Instagram story target '{target.key}' requires SOCIAL_GENERATED_IMAGE_PUBLIC_BASE_URL or another public image_url"
-        )
+    if target.platform == "instagram":
+        return publisher.publish_story(post, image_path=image_path, image_url=image_url)
+
+    video_path = (
+        getattr(post, "generated_video_path", None)
+        or getattr(post, "video_path", None)
+        or ""
+    ).strip() or None
 
     return publisher.publish_story(
-        post, 
-        image_path=image_path, 
-        image_url=image_url, 
-        video_path=video_path
+        post,
+        image_path=image_path,
+        image_url=image_url,
+        video_path=video_path,
     )
 
 
@@ -218,9 +233,7 @@ def publish_to_targets(
         target = targets[key]
 
         if not target.enabled:
-            result["skipped"].append(
-                {"target": key, "platform": target.platform, "reason": "disabled"}
-            )
+            result["skipped"].append({"target": key, "platform": target.platform, "reason": "disabled"})
             continue
 
         if post.content_type.lower() not in target.allowed_content_types:
@@ -248,36 +261,32 @@ def publish_to_targets(
                 or getattr(post, "image_url", None)
                 or getattr(post, "generated_image_path", None)
             )
-            
-            # For video-first strategies, we might not strictly require an image if a video exists
+
             has_video = bool(
-                getattr(post, "generated_video_path", None) or getattr(post, "video_path", None)
+                getattr(post, "generated_video_path", None)
+                or getattr(post, "video_path", None)
+                or getattr(post, "generated_video_url", None)
+                or getattr(post, "video_url", None)
             )
 
             if target.require_image and not has_image and not has_video:
-                raise PlatformError(f"Target '{target.key}' requires an image")
+                raise PlatformError(f"Target '{target.key}' requires an image or video")
 
             if dry_run:
-                result["skipped"].append(
-                    {
-                        "target": key,
-                        "platform": target.platform,
-                        "reason": "dry_run",
-                        "generated_image_path": getattr(post, "generated_image_path", None),
-                        "generated_image_public_url": getattr(post, "generated_image_public_url", None),
-                        "story_generated_image_path": getattr(post, "story_generated_image_path", None),
-                        "story_generated_image_public_url": getattr(post, "story_generated_image_public_url", None),
-                        "image_url": getattr(post, "image_url", None),
-                        "background_image_path": getattr(post, "background_image_path", None),
-                        "background_image_photographer": getattr(post, "background_image_photographer", None),
-                        "story_enabled": bool(getattr(target, "publish_story", False)),
-                    }
-                )
+                result["skipped"].append({"target": key, "platform": target.platform, "reason": "dry_run"})
                 continue
 
             publisher = get_platform_publisher(target)
             raw_publish_result = publisher.publish(post)
             publish_result = _normalize_publish_result(raw_publish_result)
+
+            if target.platform == "instagram":
+                video_url = _get_video_url(post)
+                if video_url:
+                    try:
+                        publisher.publish_reel(post, video_url=video_url)
+                    except Exception as e:
+                        print(f"WARNING: Instagram reel publish failed: {e}")
 
             story_id = None
             story_error = None
@@ -286,10 +295,7 @@ def publish_to_targets(
                     story_id = _publish_story_if_enabled(post, target, publisher)
                 except Exception as exc:
                     story_error = str(exc)
-                    print(
-                        f"WARNING: Feed publish succeeded for target '{target.key}' "
-                        f"but story publish failed: {exc}"
-                    )
+                    print(f"WARNING: Story publish failed: {exc}")
 
             store.mark_posted(
                 target_key=target.key,
@@ -315,28 +321,10 @@ def publish_to_targets(
                     "story_generated_image_path": getattr(post, "story_generated_image_path", None),
                     "story_generated_image_public_url": getattr(post, "story_generated_image_public_url", None),
                     "image_url": getattr(post, "image_url", None),
-                    "background_image_path": getattr(post, "background_image_path", None),
-                    "background_image_photographer": getattr(post, "background_image_photographer", None),
                 }
             )
 
         except Exception as exc:
-            image_missing = not (
-                getattr(post, "generated_image_path", None)
-                or getattr(post, "generated_image_public_url", None)
-                or getattr(post, "image_url", None)
-            )
-
-            if target.skip_if_image_generation_fails and post.generate_image and image_missing:
-                result["skipped"].append(
-                    {
-                        "target": key,
-                        "platform": target.platform,
-                        "reason": f"image_generation_failed:{exc}",
-                    }
-                )
-                continue
-
             store.mark_failed(
                 target_key=target.key,
                 platform=target.platform,

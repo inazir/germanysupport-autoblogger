@@ -15,6 +15,8 @@ class PlatformError(RuntimeError):
 class PublishResult:
     remote_post_id: str
     first_comment_id: Optional[str] = None
+    reel_id: Optional[str] = None
+    story_id: Optional[str] = None
 
 
 class BasePlatformPublisher(ABC):
@@ -32,4 +34,6 @@ class BasePlatformPublisher(ABC):
         image_path: Optional[str] = None,
         image_url: Optional[str] = None,
     ) -> str:
-        raise PlatformError(f"Stories are not implemented for platform '{self.target.platform}'")
+        raise PlatformError(
+            f"Stories are not implemented for platform '{self.target.platform}'"
+        )

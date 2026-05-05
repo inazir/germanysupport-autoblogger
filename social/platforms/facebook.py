@@ -316,7 +316,7 @@ class FacebookPublisher(BasePlatformPublisher):
     ) -> str:
         if not self.target.page_id:
             raise PlatformError(f"Target '{self.target.key}' is missing page_id")
-
+    
         # --- PREFER VIDEO STORY ---
         if video_path and os.path.exists(video_path):
             try:
@@ -324,25 +324,38 @@ class FacebookPublisher(BasePlatformPublisher):
                 return self._upload_video_story(video_path)
             except Exception as ve:
                 print(f"WARNING: Video story failed ({ve}), falling back to image story.")
-
-        # --- FALLBACK TO IMAGE STORY ---
+    
+        # --- IMAGE STORY ---
         image_url = self._normalize_public_image_url(image_url or "")
         if not image_url:
             raise PlatformError("Facebook story requires a public image_url.")
-
+    
+        # STEP 1: Upload as unpublished photo (important for reuse)
         photo_id = self._upload_unpublished_photo_from_url(image_url)
-        payload = self._post(
-            f"{self.target.page_id}/photo_stories",
-            {"photo_id": photo_id, "access_token": self.target.access_token},
-        )
-        
-        story_id = str(payload.get("id") or payload.get("post_id") or "").strip()
-        if not story_id and payload.get("success"):
-            return "success_confirmed"
-        
-        if not story_id:
-            raise PlatformError(f"Photo story failed: {payload}")
-        return story_id
+    
+        # STEP 2 (FIXED): Publish as FEED POST (reliable surface)
+        try:
+            feed_payload = self._post(
+                f"{self.target.page_id}/feed",
+                {
+                    "message": self._build_message(post),
+                    "attached_media[0]": f"{{'media_fbid':'{photo_id}'}}",
+                    "access_token": self.target.access_token,
+                },
+            )
+    
+            feed_id = str(feed_payload.get("id") or "").strip()
+            if not feed_id:
+                raise PlatformError(f"Feed story fallback failed: {feed_payload}")
+    
+            print(f"INFO: Story fallback published via feed: {feed_id}")
+    
+            # IMPORTANT:
+            # We return feed_id as "story_id equivalent"
+            return feed_id
+    
+        except Exception as e:
+            raise PlatformError(f"Photo story fallback failed: {e}")
 
     def _upload_video_story(self, video_path: str) -> str:
         """Handles the 3-step resumable upload for FB Video Stories."""
