@@ -40,13 +40,19 @@ def _build_generated_image_public_url(output_path: str | os.PathLike[str]) -> st
     return f"{public_base}/{file_name}"
 
 
-def _build_generated_video_public_url(video_path: str | os.PathLike[str]) -> str | None:
+def _build_generated_video_public_url(output_path: str | os.PathLike[str]) -> str | None:
     public_base = os.getenv("SOCIAL_GENERATED_VIDEO_PUBLIC_BASE_URL", "").strip().rstrip("/")
     if not public_base:
         return None
 
-    file_name = Path(video_path).name
-    return f"{public_base}/generated_videos/{file_name}"
+    output_path_obj = Path(output_path)
+    file_name = output_path_obj.name
+    parent_name = output_path_obj.parent.name
+
+    if parent_name == "generated_videos":
+        return f"{public_base}/generated_videos/{file_name}"
+
+    return f"{public_base}/{file_name}"
 
 
 def _ensure_background_image(post: SocialPost, target: SocialTarget) -> None:
@@ -88,40 +94,13 @@ def _prepare_generated_image(post: SocialPost, target: SocialTarget) -> None:
             post=post,
             brand_text=brand_text,
             filename_prefix=target.key,
-            cta_text="Check the first comment for the exact link",
+            cta_text="Check the link in the comments or visit the website!",
         )
         post.generated_image_path = output_path
         post.generated_image_public_url = _build_generated_image_public_url(output_path)
 
     if getattr(post, "generated_image_public_url", None):
         post.image_url = post.generated_image_public_url
-
-    if getattr(target, "publish_story", False):
-        story_path = (getattr(post, "story_generated_image_path", None) or "").strip()
-        if story_path and Path(story_path).exists():
-            if not getattr(post, "story_generated_image_public_url", None):
-                post.story_generated_image_public_url = _build_generated_image_public_url(story_path)
-        else:
-            story_output_path = generate_branded_image(
-                post=post,
-                brand_text=brand_text,
-                filename_prefix=f"{target.key}_story",
-                cta_text="Read full guide on GermanySupport.de",
-            )
-            post.story_generated_image_path = story_output_path
-            post.story_generated_image_public_url = _build_generated_image_public_url(story_output_path)
-
-    print(
-        "DEBUG GENERATED IMAGE",
-        {
-            "target": target.key,
-            "generated_image_path": getattr(post, "generated_image_path", None),
-            "generated_image_public_url": getattr(post, "generated_image_public_url", None),
-            "story_generated_image_path": getattr(post, "story_generated_image_path", None),
-            "story_generated_image_public_url": getattr(post, "story_generated_image_public_url", None),
-            "image_url": getattr(post, "image_url", None),
-        },
-    )
 
 
 def _normalize_publish_result(publish_result):
@@ -155,21 +134,29 @@ def _normalize_publish_result(publish_result):
     raise PlatformError(f"Unsupported publish result type: {type(publish_result).__name__}")
 
 
+# ---------------- VIDEO URL LOGIC ----------------
 def _get_video_url(post: SocialPost) -> str | None:
-    video_url = getattr(post, "generated_video_url", None) or getattr(post, "video_url", None)
-    if video_url:
-        return video_url
+    # 1. Use an already-resolved public URL if upstream set it directly.
+    #    This is the common path: share_existing_articles.py constructs the
+    #    public URL and passes it via --generated-video-public-url, which
+    #    cli.py stores on post.generated_video_public_url.  Checking this
+    #    first avoids a dependency on SOCIAL_GENERATED_VIDEO_PUBLIC_BASE_URL
+    #    being configured, which was causing _get_video_url to return None
+    #    for gs_ig_main and silently skip Reel publishing for Instagram.
+    direct_url = (
+        getattr(post, "generated_video_public_url", None)
+        or getattr(post, "video_url", None)
+    )
+    if direct_url:
+        return direct_url
 
+    # 2. Fallback: derive public URL from a local path using the env-var base.
+    #    Only reached if no pre-built URL was provided.
     video_path = getattr(post, "generated_video_path", None) or getattr(post, "video_path", None)
-    if not video_path:
-        return None
+    if video_path:
+        return _build_generated_video_public_url(video_path)
 
-    public_base = os.getenv("SOCIAL_GENERATED_VIDEO_PUBLIC_BASE_URL", "").strip().rstrip("/")
-    if not public_base:
-        return None
-
-    file_name = Path(video_path).name
-    return f"{public_base}/generated_videos/{file_name}"
+    return None
 
 
 def _publish_story_if_enabled(post: SocialPost, target: SocialTarget, publisher):
@@ -188,16 +175,6 @@ def _publish_story_if_enabled(post: SocialPost, target: SocialTarget, publisher)
         or getattr(post, "image_url", None)
         or ""
     ).strip() or None
-
-    print(
-        "DEBUG STORY PAYLOAD",
-        {
-            "target": target.key,
-            "platform": target.platform,
-            "image_path": image_path,
-            "image_url": image_url,
-        },
-    )
 
     if target.platform == "instagram":
         return publisher.publish_story(post, image_path=image_path, image_url=image_url)
@@ -247,9 +224,7 @@ def publish_to_targets(
             continue
 
         if store.already_posted(target.key, post.external_id):
-            result["skipped"].append(
-                {"target": key, "platform": target.platform, "reason": "already_posted"}
-            )
+            result["skipped"].append({"target": key, "platform": target.platform, "reason": "already_posted"})
             continue
 
         try:
@@ -277,19 +252,37 @@ def publish_to_targets(
                 continue
 
             publisher = get_platform_publisher(target)
+
             raw_publish_result = publisher.publish(post)
             publish_result = _normalize_publish_result(raw_publish_result)
 
-            if target.platform == "instagram":
-                video_url = _get_video_url(post)
-                if video_url:
-                    try:
-                        publisher.publish_reel(post, video_url=video_url)
-                    except Exception as e:
-                        print(f"WARNING: Instagram reel publish failed: {e}")
+            video_url = _get_video_url(post)
+            reel_id = None
+
+            # Reel upload is Instagram-only. Facebook uses a separate video
+            # upload flow (publish_story / 3-step resumable upload) and does
+            # not implement publish_reel — calling it raised AttributeError.
+            if video_url and target.platform == "instagram":
+                try:
+                    print(f"INFO: Uploading Reel for {target.platform}: {video_url}")
+
+                    reel_result = publisher.publish_reel(post, video_url=video_url)
+                    reel_result = _normalize_publish_result(reel_result)
+
+                    reel_id = (
+                        getattr(reel_result, "reel_id", None)
+                        or getattr(reel_result, "remote_post_id", None)
+                        or getattr(reel_result, "id", None)
+                    )
+
+                    print(f"INFO: Reel created: {reel_id}")
+
+                except Exception as e:
+                    print(f"WARNING: Reel publish failed on {target.platform}: {e}")
 
             story_id = None
             story_error = None
+
             if getattr(target, "publish_story", False):
                 try:
                     story_id = _publish_story_if_enabled(post, target, publisher)
@@ -312,7 +305,7 @@ def publish_to_targets(
                     "target": key,
                     "platform": target.platform,
                     "id": publish_result.remote_post_id,
-                    "reel_id": getattr(publish_result, "reel_id", None),
+                    "reel_id": reel_id,
                     "first_comment_id": publish_result.first_comment_id,
                     "story_id": story_id,
                     "story_error": story_error,
@@ -333,8 +326,7 @@ def publish_to_targets(
                 wp_post_id=post.wp_post_id,
                 error_message=str(exc),
             )
-            result["failed"].append(
-                {"target": key, "platform": target.platform, "error": str(exc)}
-            )
+
+            result["failed"].append({"target": key, "platform": target.platform, "error": str(exc)})
 
     return result

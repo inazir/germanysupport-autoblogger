@@ -6,6 +6,7 @@ import random
 import re
 import requests
 from openai import OpenAI
+from pathlib import Path
 from typing import List, Tuple
 
 from social.config import get_social_targets
@@ -152,6 +153,27 @@ def build_social_post(wp_post: dict, caption: str, all_hashtags: List[str], targ
     )
 
 
+def _build_video_public_url(video_path: str) -> str | None:
+    """
+    Derive the public HTTPS URL for a generated video file.
+
+    Mirrors the logic in publisher._build_generated_video_public_url but
+    called here — in share_existing_articles — where the path is first known,
+    so publisher.py receives a ready-made URL on post.generated_video_public_url
+    rather than having to re-derive it (which failed silently when the env var
+    was not set, causing _get_video_url to return None and skipping Reel upload).
+    """
+    public_base = os.getenv("SOCIAL_GENERATED_VIDEO_PUBLIC_BASE_URL", "").strip().rstrip("/")
+    if not public_base:
+        return None
+    p = Path(video_path)
+    # Path structure: .../cache/generated_videos/<slug>/final_video.mp4
+    # Public URL:     <base>/generated_videos/<slug>/final_video.mp4
+    slug_dir = p.parent.name      # e.g. "things-you-must-know-before-buying-a-car"
+    filename  = p.name            # e.g. "final_video.mp4"
+    return f"{public_base}/generated_videos/{slug_dir}/{filename}"
+
+
 def main(dry_run: bool = False, target_names: str | None = None, only_english: bool | None = None):
     if only_english is None:
         only_english = SOCIAL_EXISTING_ONLY_ENGLISH
@@ -184,7 +206,7 @@ def main(dry_run: bool = False, target_names: str | None = None, only_english: b
     selected = random.choice(candidates)
     print(f"Selected post: {selected['title']['rendered']} (ID: {selected['id']})")
 
-    # 1. Generate content via DeepSeek (Saving budget here)
+    # 1. Generate content via DeepSeek
     caption, hashtags = generate_caption_and_hashtags(
         selected["title"]["rendered"], 
         selected.get("excerpt", {}).get("rendered", "")
@@ -216,6 +238,20 @@ def main(dry_run: bool = False, target_names: str | None = None, only_english: b
                 print(f"LOG: Generating video for Reel/Story: {social_post.title}")
                 video_path = generate_short_video(social_post)
                 social_post.generated_video_path = video_path
+
+                # Derive and store the public URL immediately after generation.
+                # publisher._get_video_url() checks generated_video_public_url first;
+                # without this line it fell back to re-deriving from the path via
+                # _build_generated_video_public_url(), which returned None when
+                # SOCIAL_GENERATED_VIDEO_PUBLIC_BASE_URL was unset — silently
+                # skipping Reel upload for every target.
+                video_public_url = _build_video_public_url(video_path)
+                if video_public_url:
+                    social_post.generated_video_public_url = video_public_url
+                    print(f"INFO: Video public URL: {video_public_url}")
+                else:
+                    print("WARNING: SOCIAL_GENERATED_VIDEO_PUBLIC_BASE_URL not set — Reel upload will be skipped.")
+
                 print(f"LOG: Video saved at: {video_path}")
             except Exception as v_err:
                 print(f"ERROR: Video generation failed: {v_err}")
