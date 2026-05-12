@@ -40,19 +40,33 @@ def _build_generated_image_public_url(output_path: str | os.PathLike[str]) -> st
     return f"{public_base}/{file_name}"
 
 
-def _build_generated_video_public_url(output_path: str | os.PathLike[str]) -> str | None:
-    public_base = os.getenv("SOCIAL_GENERATED_VIDEO_PUBLIC_BASE_URL", "").strip().rstrip("/")
-    if not public_base:
+def _build_generated_video_public_url(generated_video_path: str) -> str:
+    """
+    Converts:
+    /.../social/cache/generated_videos/<slug>/final_video.mp4
+
+    INTO:
+    https://domain/social-videos/generated_videos/<slug>/final_video.mp4
+    """
+
+    from pathlib import Path
+
+    public_base = "https://germanysupport.de/social-videos"
+
+    path = Path(generated_video_path)
+
+    parts = path.parts
+
+    # find generated_videos index
+    if "generated_videos" not in parts:
         return None
 
-    output_path_obj = Path(output_path)
-    file_name = output_path_obj.name
-    parent_name = output_path_obj.parent.name
+    idx = parts.index("generated_videos")
 
-    if parent_name == "generated_videos":
-        return f"{public_base}/generated_videos/{file_name}"
+    # keep everything after generated_videos
+    relative_path = "/".join(parts[idx:])
 
-    return f"{public_base}/{file_name}"
+    return f"{public_base}/{relative_path}"
 
 
 def _ensure_background_image(post: SocialPost, target: SocialTarget) -> None:
@@ -135,12 +149,22 @@ def _normalize_publish_result(publish_result):
 
 
 # ---------------- FIXED VIDEO URL LOGIC ----------------
-def _get_video_url(post: SocialPost) -> str | None:
-    video_path = getattr(post, "generated_video_path", None) or getattr(post, "video_path", None)
-    if video_path:
-        return _build_generated_video_public_url(video_path)
+def _get_video_url(post):
+    # ✅ 1. TRUST EXISTING RESOLVED URL FIRST (MOST IMPORTANT FIX)
+    if getattr(post, "generated_video_public_url", None):
+        return post.generated_video_public_url
 
-    return getattr(post, "generated_video_url", None) or getattr(post, "video_url", None)
+    if getattr(post, "video_url", None):
+        return post.video_url
+
+    if getattr(post, "generated_video_url", None):
+        return post.generated_video_url
+
+    # ❌ only fallback to path-based generation as last resort
+    if getattr(post, "generated_video_path", None):
+        return _build_generated_video_public_url(post.generated_video_path)
+
+    return None
 
 
 def _publish_story_if_enabled(post: SocialPost, target: SocialTarget, publisher):
@@ -240,14 +264,53 @@ def publish_to_targets(
             raw_publish_result = publisher.publish(post)
             publish_result = _normalize_publish_result(raw_publish_result)
 
-            video_url = _get_video_url(post)
+            # -------------------------------------------------
+            # REEL HANDLING (FIXED MINIMAL PATCH)
+            # -------------------------------------------------
             reel_id = None
+            video_url = None
 
-            if video_url:
+            generated_path = getattr(post, "generated_video_path", None)
+
+            if generated_path:
+                video_url = _build_generated_video_public_url(generated_path)
+                print(f"[VIDEO-FIX] Using generated_video_path -> {video_url}")
+
+            print(f"DEBUG [{target.platform}] generated_video_path={generated_path}")
+            print(f"DEBUG [{target.platform}] video_url={getattr(post,'video_url',None)}")
+            print(f"DEBUG [{target.platform}] generated_video_url={getattr(post,'generated_video_url',None)}")
+
+            # IMPORTANT: DO NOT fallback to broken /social-videos/final_video.mp4 logic
+            if not video_url:
+                print(f"[VIDEO-FIX] No valid generated video URL found -> skipping reel pipeline")
+
+            # Only IG uses separate reel pipeline
+            if target.platform == "instagram" and video_url:
                 try:
-                    print(f"INFO: Uploading Reel for {target.platform}: {video_url}")
+                    print("\n========== IG REEL PIPELINE START ==========")
+                    print(f"[IG-DEBUG] Target: {target.key}")
+                    print(f"[IG-DEBUG] Video URL: {video_url}")
+                    print(f"[IG-DEBUG] Post ID: {post.external_id}")
 
-                    reel_result = publisher.publish_reel(post, video_url=video_url)
+                    import requests
+
+                    head = requests.head(video_url, timeout=10, allow_redirects=True)
+
+                    print(f"[IG-DEBUG] HEAD status: {head.status_code}")
+
+                    # HARD STOP if URL is invalid (IMPORTANT FIX)
+                    if head.status_code != 200:
+                        raise PlatformError(f"Video URL not accessible (HEAD {head.status_code}): {video_url}")
+
+                    print("[IG-DEBUG] Calling publish_reel()...")
+
+                    reel_result = publisher.publish_reel(
+                        post,
+                        video_url=video_url
+                    )
+
+                    print(f"[IG-DEBUG] publish_reel() returned: {reel_result}")
+
                     reel_result = _normalize_publish_result(reel_result)
 
                     reel_id = (
@@ -256,19 +319,16 @@ def publish_to_targets(
                         or getattr(reel_result, "id", None)
                     )
 
-                    print(f"INFO: Reel created: {reel_id}")
+                    print(f"[IG-DEBUG] FINAL reel_id: {reel_id}")
+                    print("========== IG REEL PIPELINE END ==========\n")
 
                 except Exception as e:
-                    print(f"WARNING: Reel publish failed on {target.platform}: {e}")
+                    print(f"[IG-ERROR] Reel publish failed on instagram: {e}")
 
             story_id = None
             story_error = None
 
             if getattr(target, "publish_story", False):
-                # Facebook handles stories per-page inside publish() itself
-                # (to ensure every configured page gets a story, not just the
-                # last one). Skip the call here to avoid a duplicate story on
-                # whichever page self.target happened to be set to last.
                 if getattr(raw_publish_result, "story_handled", False):
                     print(f"LOG: Stories already handled inside publisher for {target.key}")
                 else:

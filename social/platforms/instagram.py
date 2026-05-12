@@ -73,6 +73,22 @@ class InstagramPublisher(BasePlatformPublisher):
             f"Container timeout after {max_attempts * interval}s "
             f"(container_id={creation_id}, last status={status})"
         )
+    def _wait_until_video_ready(self, url: str, max_checks: int = 12, interval: int = 5) -> str:
+        """
+        Ensures Instagram can fetch the video (prevents 404 / race condition).
+        """
+        for i in range(max_checks):
+            try:
+                r = requests.head(url, timeout=10, allow_redirects=True)
+                if r.status_code == 200 and "video" in (r.headers.get("content-type", "")):
+                    return url
+            except Exception:
+                pass
+    
+            print(f"INFO: Video not ready yet (check {i+1}/{max_checks})")
+            time.sleep(interval)
+    
+        raise PlatformError(f"Video URL not stable after wait: {url}")
 
     def _publish(self, creation_id: str) -> str:
         result = self._post(
@@ -118,9 +134,12 @@ class InstagramPublisher(BasePlatformPublisher):
         if not video_url:
             raise PlatformError("Reel requires video_url")
     
-        # Optional: basic validation (prevents silent API failures)
         if not video_url.startswith("http"):
             raise PlatformError(f"Invalid video_url: {video_url}")
+    
+        print(f"[IG] Reel start | URL={video_url}")
+    
+        video_url = self._wait_until_video_ready(video_url)
     
         try:
             create_payload = {
@@ -139,25 +158,44 @@ class InstagramPublisher(BasePlatformPublisher):
             if not cid:
                 raise PlatformError(f"Reel creation failed: {create}")
     
-            # Reels take significantly longer to process than images —
-            # up to 2-3 minutes. Use 40 × 5s = 200s max wait.
+            print(f"[IG] Container created | id={cid}")
+            print(f"[IG] Waiting for processing...")
+    
+            # STEP 1: WAIT FOR PROCESSING
             self._wait(cid, max_attempts=40, interval=5)
     
-            # Publish step
+            print(f"[IG] Container ready")
+    
+            # STEP 2: SAFETY BUFFER
+            time.sleep(5)
+    
+            # STEP 3: OPTIONAL FINAL URL CHECK
+            try:
+                import requests
+                head = requests.head(video_url, timeout=10)
+                if head.status_code != 200:
+                    print(f"[IG] URL check warning | status={head.status_code}")
+            except Exception as ex:
+                print(f"[IG] URL check skipped | {ex}")
+    
+            # STEP 4: PUBLISH
+            print(f"[IG] Publishing reel...")
+    
             media_id = self._publish(cid)
     
             if not media_id:
                 raise PlatformError(f"Reel publish failed for container_id={cid}")
     
-            # Set reel_id explicitly — media_id from /media_publish IS the reel ID.
-            # Without this, _normalize_publish_result sees reel_id=None and
-            # publisher.py logs "Reel created: None" instead of the actual ID.
-            return PublishResult(remote_post_id=media_id, reel_id=media_id)
+            print(f"[IG] Reel published | media_id={media_id}")
+    
+            return PublishResult(
+                remote_post_id=media_id,
+                reel_id=media_id,
+            )
     
         except Exception as e:
-            # IMPORTANT: preserves root cause (very useful in production debugging)
+            print(f"[IG] Reel FAILED | {e}")
             raise PlatformError(f"Instagram reel publish error: {str(e)}") from e
-
     # -------------------------
     # STORY (IMAGE ONLY)
     # -------------------------
