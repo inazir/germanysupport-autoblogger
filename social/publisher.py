@@ -94,7 +94,7 @@ def _prepare_generated_image(post: SocialPost, target: SocialTarget) -> None:
             post=post,
             brand_text=brand_text,
             filename_prefix=target.key,
-            cta_text="Check the link in the comments or visit the website!",
+            cta_text="Check the first comment for the exact link",
         )
         post.generated_image_path = output_path
         post.generated_image_public_url = _build_generated_image_public_url(output_path)
@@ -134,29 +134,13 @@ def _normalize_publish_result(publish_result):
     raise PlatformError(f"Unsupported publish result type: {type(publish_result).__name__}")
 
 
-# ---------------- VIDEO URL LOGIC ----------------
+# ---------------- FIXED VIDEO URL LOGIC ----------------
 def _get_video_url(post: SocialPost) -> str | None:
-    # 1. Use an already-resolved public URL if upstream set it directly.
-    #    This is the common path: share_existing_articles.py constructs the
-    #    public URL and passes it via --generated-video-public-url, which
-    #    cli.py stores on post.generated_video_public_url.  Checking this
-    #    first avoids a dependency on SOCIAL_GENERATED_VIDEO_PUBLIC_BASE_URL
-    #    being configured, which was causing _get_video_url to return None
-    #    for gs_ig_main and silently skip Reel publishing for Instagram.
-    direct_url = (
-        getattr(post, "generated_video_public_url", None)
-        or getattr(post, "video_url", None)
-    )
-    if direct_url:
-        return direct_url
-
-    # 2. Fallback: derive public URL from a local path using the env-var base.
-    #    Only reached if no pre-built URL was provided.
     video_path = getattr(post, "generated_video_path", None) or getattr(post, "video_path", None)
     if video_path:
         return _build_generated_video_public_url(video_path)
 
-    return None
+    return getattr(post, "generated_video_url", None) or getattr(post, "video_url", None)
 
 
 def _publish_story_if_enabled(post: SocialPost, target: SocialTarget, publisher):
@@ -259,10 +243,7 @@ def publish_to_targets(
             video_url = _get_video_url(post)
             reel_id = None
 
-            # Reel upload is Instagram-only. Facebook uses a separate video
-            # upload flow (publish_story / 3-step resumable upload) and does
-            # not implement publish_reel — calling it raised AttributeError.
-            if video_url and target.platform == "instagram":
+            if video_url:
                 try:
                     print(f"INFO: Uploading Reel for {target.platform}: {video_url}")
 
@@ -284,11 +265,18 @@ def publish_to_targets(
             story_error = None
 
             if getattr(target, "publish_story", False):
-                try:
-                    story_id = _publish_story_if_enabled(post, target, publisher)
-                except Exception as exc:
-                    story_error = str(exc)
-                    print(f"WARNING: Story publish failed: {exc}")
+                # Facebook handles stories per-page inside publish() itself
+                # (to ensure every configured page gets a story, not just the
+                # last one). Skip the call here to avoid a duplicate story on
+                # whichever page self.target happened to be set to last.
+                if getattr(raw_publish_result, "story_handled", False):
+                    print(f"LOG: Stories already handled inside publisher for {target.key}")
+                else:
+                    try:
+                        story_id = _publish_story_if_enabled(post, target, publisher)
+                    except Exception as exc:
+                        story_error = str(exc)
+                        print(f"WARNING: Story publish failed: {exc}")
 
             store.mark_posted(
                 target_key=target.key,
