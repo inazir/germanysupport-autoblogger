@@ -4,7 +4,7 @@ from social.config import append_utm, get_default_hashtags
 from social.models import SocialPost, SocialTarget
 
 
-MAX_DEFAULT_SUMMARY = 260
+MAX_DEFAULT_SUMMARY = 1000
 
 
 def _clean(value: str | None) -> str:
@@ -26,7 +26,7 @@ def build_link_for_target(post: SocialPost, target: SocialTarget) -> str:
 
 def build_article_summary(post: SocialPost, max_len: int | None = None) -> str:
     text = _clean(post.summary) or _clean(post.promo_text)
-    return _truncate(text, max_len or MAX_DEFAULT_SUMMARY)
+    return text
 
 
 def build_deal_summary(post: SocialPost, max_len: int | None = None) -> str:
@@ -41,13 +41,13 @@ def build_deal_summary(post: SocialPost, max_len: int | None = None) -> str:
         parts.append(f"🎟️ Code: {_clean(post.coupon_code)}")
     if post.promo_text:
         parts.append(_clean(post.promo_text))
-    return _truncate("\n".join(parts).strip(), max_len or MAX_DEFAULT_SUMMARY)
+    return "\n".join(parts).strip()
 
 
 def build_facebook_message(post: SocialPost, target: SocialTarget) -> str:
     parts = [f"🔥 {_clean(post.title)}"]
     if post.content_type == "deal":
-        body = build_deal_summary(post, target.max_caption_chars)
+        body = build_deal_summary(post)
     else:
         body = build_article_summary(post, target.max_caption_chars)
     if body:
@@ -59,13 +59,16 @@ def build_facebook_message(post: SocialPost, target: SocialTarget) -> str:
     hashtags = _clean(post.hashtags) or get_default_hashtags(post.language, post.content_type)
     if hashtags:
         parts.append(hashtags)
-    return "\n\n".join([p for p in parts if p])
+    message = "\n\n".join([p for p in parts if p])
+
+    max_len = target.max_caption_chars or 5000  # safe FB baseline
+    return _truncate(message, max_len)
 
 
 def build_instagram_caption(post: SocialPost, target: SocialTarget) -> str:
     parts = [f"🔥 {_clean(post.title)}"]
     if post.content_type == "deal":
-        body = build_deal_summary(post, target.max_caption_chars)
+        body = build_deal_summary(post)
     else:
         body = build_article_summary(post, target.max_caption_chars)
     if body:
@@ -74,4 +77,7 @@ def build_instagram_caption(post: SocialPost, target: SocialTarget) -> str:
     hashtags = _clean(post.hashtags) or get_default_hashtags(post.language, post.content_type)
     if hashtags:
         parts.append(hashtags)
-    return "\n\n".join([p for p in parts if p])
+    message = "\n\n".join([p for p in parts if p])
+
+    max_len = target.max_caption_chars or 2200  # IG practical limit
+    return _truncate(message, max_len)

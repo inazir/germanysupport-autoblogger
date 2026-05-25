@@ -97,12 +97,15 @@ def _prepare_generated_image(post: SocialPost, target: SocialTarget) -> None:
 
     brand_text = os.getenv("SOCIAL_BRAND_TEXT", "GermanySupport")
 
+    # 🔥 NOW POWERED BY IMAGE ORCHESTRATOR (via _ensure_background_image)
     _ensure_background_image(post, target)
 
     existing_path = (getattr(post, "generated_image_path", None) or "").strip()
+
     if existing_path and Path(existing_path).exists():
         if not getattr(post, "generated_image_public_url", None):
             post.generated_image_public_url = _build_generated_image_public_url(existing_path)
+
     else:
         output_path = generate_branded_image(
             post=post,
@@ -110,6 +113,7 @@ def _prepare_generated_image(post: SocialPost, target: SocialTarget) -> None:
             filename_prefix=target.key,
             cta_text="Check the first comment for the exact link",
         )
+
         post.generated_image_path = output_path
         post.generated_image_public_url = _build_generated_image_public_url(output_path)
 
