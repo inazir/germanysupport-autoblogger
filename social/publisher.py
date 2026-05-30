@@ -111,7 +111,7 @@ def _prepare_generated_image(post: SocialPost, target: SocialTarget) -> None:
             post=post,
             brand_text=brand_text,
             filename_prefix=target.key,
-            cta_text="Check the first comment for the exact link",
+            cta_text="Check the comments section for more updates!",
         )
 
         post.generated_image_path = output_path
