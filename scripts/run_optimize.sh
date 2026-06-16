@@ -1,4 +1,6 @@
 #!/bin/bash
+# Auto-discover Python path if missing
+command -v python3 >/dev/null || export PATH="$(ls -d /opt/alt/python3*/bin 2>/dev/null | sort -V | tail -n 1):$PATH"
 set -e
 
 REPO_DIR="/home/u989113309/domains/germanysupport.de/repos/germanysupport-autoblogger"
