@@ -53,9 +53,6 @@ def build_facebook_message(post: SocialPost, target: SocialTarget) -> str:
     if body:
         parts.append(body)
 
-    if not target.post_link_in_first_comment:
-        parts.append(f"👉 {build_link_for_target(post, target)}")
-
     hashtags = _clean(post.hashtags) or get_default_hashtags(post.language, post.content_type)
     if hashtags:
         parts.append(hashtags)

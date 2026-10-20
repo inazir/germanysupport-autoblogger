@@ -415,7 +415,6 @@ class FacebookPublisher(BasePlatformPublisher):
             self.target.page_id      = page_id
             self.target.access_token = token
 
-            post_link_in_first_comment = bool(getattr(self.target, "post_link_in_first_comment", False))
             comment_fail_is_fatal      = bool(getattr(self.target, "comment_fail_is_fatal", False))
 
             video_path           = (getattr(post, "generated_video_path", "") or getattr(post, "video_path", "") or "").strip()
@@ -443,7 +442,7 @@ class FacebookPublisher(BasePlatformPublisher):
                     print(f"ERROR: Timeline post failed for {name}: {e}")
 
                 # --- STEP 2: LINK COMMENT ---
-                if fb_post_id and post_link_in_first_comment and post.link:
+                if fb_post_id and post.link:
                     try:
                         first_comment_id = self._post_first_comment(fb_post_id, post.link)
                         print(f"INFO: Link comment added: {first_comment_id}")
