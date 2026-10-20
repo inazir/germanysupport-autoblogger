@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Auto-discover Python path if missing
+command -v python3 >/dev/null || export PATH="$(ls -d /opt/alt/python3*/bin 2>/dev/null | sort -V | tail -n 1):$PATH"
 # scripts/run_viral_posts.sh
 # ---------------------------------------------------------------------------
 # Wrapper for social/share_viral_posts.py

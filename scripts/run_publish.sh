@@ -7,7 +7,7 @@ ENV_FILE="$REPO_DIR/.env"
 LOG_DIR="$REPO_DIR/logs"
 CACHE_DIR="$REPO_DIR/cache"
 LOG_FILE="$LOG_DIR/cron.log"
-PYTHON_BIN="/usr/bin/python3"
+PYTHON_BIN="python3"
 SCRIPT_FILE="$REPO_DIR/publish_article.py"
 GIT_SYNC_SCRIPT="$REPO_DIR/scripts/run_git_sync.sh"
 

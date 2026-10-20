@@ -6,7 +6,7 @@ set -e
 REPO_DIR="/home/u989113309/domains/germanysupport.de/repos/germanysupport-autoblogger"
 ENV_FILE="$REPO_DIR/.env"
 LOG_FILE="$REPO_DIR/logs/cron.log"
-PYTHON_BIN="/usr/bin/python3"
+PYTHON_BIN="python3"
 SCRIPT_FILE="$REPO_DIR/optimize_articles.py"
 
 set -a

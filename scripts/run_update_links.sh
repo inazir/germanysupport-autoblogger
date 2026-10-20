@@ -21,7 +21,7 @@ echo " Running update_links.py"
 echo " Date: $(date)"
 echo "=========================================="
 
-CMD=(python update_links.py)
+CMD=(python3 update_links.py)
 HAS_REPLACE=0
 
 while [[ "$#" -gt 0 ]]; do
