@@ -43,11 +43,12 @@ echo "[run_random_tips] Script: $0"
 echo "[run_random_tips] Repo root: $REPO_ROOT"
 echo "[run_random_tips] Args: $*"
 echo "[run_random_tips] Provider: ${TIPS_LLM_PROVIDER:-anthropic}"
-echo "[run_random_tips] Language: ${TIPS_LLM_LANGUAGE:-en}"
+TIPS_LANGUAGE="${TIPS_LLM_LANGUAGE:-bn}"
+echo "[run_random_tips] Language: $TIPS_LANGUAGE"
 echo "=================================================================="
 
 # Run Python module (correct way)
-"$PYTHON" -m social.share_random_tips "$@"
+"$PYTHON" -m social.share_random_tips --language "$TIPS_LANGUAGE" "$@"
 
 echo "[run_random_tips] Finished at $(date '+%Y-%m-%d %H:%M:%S')"
 echo ""

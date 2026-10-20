@@ -18,12 +18,20 @@ from social.daily_news.news_fetcher import NewsItem
 # Prompt builder
 # ---------------------------------------------------------------------------
 
-def _build_prompt(items: List[NewsItem], top_n: int = 3) -> str:
+def _build_prompt(items: List[NewsItem], top_n: int = 3, language: str = "en") -> str:
     today = datetime.now().strftime("%B %d, %Y")
     headlines = "\n".join(
         f"{i+1}. {item.title} (source: {item.source})"
         for i, item in enumerate(items[:top_n])
     )
+    language = language.lower().strip()
+    if language in {"bn", "bengali", "bangla"}:
+        language_instruction = "Write entirely in Bengali (Bangla script). Do not use English or German except for unavoidable proper names, source names, or URLs."
+    elif language == "en":
+        language_instruction = "Write in English."
+    else:
+        language_instruction = "Write in German."
+
     return f"""You are a social media manager for GermanySupport.de, a website helping expats and immigrants in Germany.
 
 Today is {today}.
@@ -40,7 +48,8 @@ REQUIREMENTS:
 - Keep each point to 1-2 short lines
 - End with ONE engaging question that invites comments (e.g. ""Read more top news in the comments!" and "Which update affects you most? Comment below 👇" )
 - Final line: "Follow @GermanySupport for daily updates."
-- Friendly, credible, easy, human English
+- Friendly, credible, easy, human writing
+- {language_instruction}
 - Avoid fake sensationalism or clickbait
 - Total length: 3 top headlines, so, should be within 500 words. But don't break lines. If required to up to 600 words.
 - No **bold**
@@ -113,7 +122,7 @@ def _try_openai(prompt: str) -> str | None:
         return None
 
 
-def _template_caption(items: List[NewsItem], top_n: int = 3) -> str:
+def _template_caption(items: List[NewsItem], top_n: int = 3, language: str = "en") -> str:
     """Fallback caption (NO AI). Structured for social posts."""
 
     emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
@@ -131,13 +140,21 @@ def _template_caption(items: List[NewsItem], top_n: int = 3) -> str:
 
         lines.append(f"{emoji} {title}")
 
-    # CTA block (kept exactly as you requested)
-    lines += [
-        "",
-        "Which update affects you most? Comment below 👇",
-        "",
-        "Follow our page for daily updates."
-    ]
+    if language.lower().strip() in {"bn", "bengali", "bangla"}:
+        cta_lines = [
+            "",
+            "কোন খবরটি আপনাকে সবচেয়ে বেশি প্রভাবিত করে? নিচে মন্তব্য করুন 👇",
+            "",
+            "প্রতিদিনের আপডেটের জন্য আমাদের পেজটি অনুসরণ করুন।",
+        ]
+    else:
+        cta_lines = [
+            "",
+            "Which update affects you most? Comment below 👇",
+            "",
+            "Follow our page for daily updates.",
+        ]
+    lines += cta_lines
 
     return "\n".join(lines)
 
@@ -146,19 +163,19 @@ def _template_caption(items: List[NewsItem], top_n: int = 3) -> str:
 # Public API
 # ---------------------------------------------------------------------------
 
-def generate_caption(items: List[NewsItem], top_n: int = 3) -> str:
+def generate_caption(items: List[NewsItem], top_n: int = 3, language: str = "en") -> str:
     """
     Generate a social media caption from the top news items.
     Tries providers in order: primary → fallback → openai → template.
     Returns caption string.
     """
     if not items:
-        return _template_caption([], top_n)
+        return _template_caption([], top_n, language)
 
     primary = os.getenv("NEWS_AI_PROVIDER", "claude").strip().lower()
     fallback = os.getenv("NEWS_AI_FALLBACK_PROVIDER", "deepseek").strip().lower()
 
-    prompt = _build_prompt(items, top_n)
+    prompt = _build_prompt(items, top_n, language)
 
     provider_map = {
         "claude": _try_claude,
@@ -183,4 +200,4 @@ def generate_caption(items: List[NewsItem], top_n: int = 3) -> str:
             return result
 
     print("  [news_ai] All AI providers failed — using template caption")
-    return _template_caption(items, top_n)
+    return _template_caption(items, top_n, language)

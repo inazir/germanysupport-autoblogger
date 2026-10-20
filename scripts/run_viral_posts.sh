@@ -32,10 +32,11 @@ echo "=================================================================="
 echo "[run_viral_posts] Starting at $(date '+%Y-%m-%d %H:%M:%S')"
 echo "[run_viral_posts] Args: $*"
 echo "[run_viral_posts] Provider: ${VIRAL_LLM_PROVIDER:-anthropic}"
-echo "[run_viral_posts] Language: ${VIRAL_LLM_LANGUAGE:-en}"
+VIRAL_LANGUAGE="${VIRAL_LLM_LANGUAGE:-bn}"
+echo "[run_viral_posts] Language: $VIRAL_LANGUAGE"
 echo "=================================================================="
 
-"$PYTHON" -m social.share_viral_posts "$@"
+"$PYTHON" -m social.share_viral_posts --language "$VIRAL_LANGUAGE" "$@"
 
 echo "[run_viral_posts] Finished at $(date '+%Y-%m-%d %H:%M:%S')"
 echo "" 

@@ -145,6 +145,12 @@ def get_default_hashtags(language: str, content_type: str) -> str:
     if value:
         return value
 
+    if language in {"bn", "bengali", "bangla"}:
+        return os.getenv(
+            "SOCIAL_DEFAULT_HASHTAGS_BN",
+            "#germanysupport #জার্মানি #প্রবাসী #জার্মানিজীবন",
+        )
+
     if language == "en":
         return os.getenv(
             "SOCIAL_DEFAULT_HASHTAGS_EN",

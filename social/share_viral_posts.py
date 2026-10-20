@@ -322,7 +322,13 @@ def _build_viral_prompt(
     language: str,
     num_comments: int,
 ) -> str:
-    lang_instruction = "Write in English." if language == "en" else "Schreibe auf Deutsch."
+    language = language.lower().strip()
+    if language in {"bn", "bengali", "bangla"}:
+        lang_instruction = "Write entirely in Bengali (Bangla script). Do not use English or German except for unavoidable proper names or URLs."
+    elif language == "en":
+        lang_instruction = "Write in English."
+    else:
+        lang_instruction = "Schreibe auf Deutsch."
 
     # Build comment slots explicitly so the model sees the exact pattern to fill
     comment_slots = "\n".join(
@@ -558,32 +564,24 @@ def _call_anthropic(prompt: str) -> str:
 
 
 def _call_deepseek(prompt: str) -> str:
+    from openai import OpenAI
+
     api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
     model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat").strip()
 
     if not api_key:
         raise RuntimeError("DEEPSEEK_API_KEY is not set")
 
-    payload = json.dumps({
-        "model": model,
-        "max_tokens": 1200,
-        "messages": [{"role": "user", "content": prompt}],
-    }).encode("utf-8")
-
-    req = urllib.request.Request(
-        "https://api.deepseek.com/v1/chat/completions",
-        data=payload,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        },
-        method="POST",
+    client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
+    response = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=1200,
     )
-
-    with urllib.request.urlopen(req, timeout=45) as resp:
-        body = json.loads(resp.read().decode("utf-8"))
-
-    return body["choices"][0]["message"]["content"].strip()
+    content = (response.choices[0].message.content or "").strip()
+    if not content:
+        raise RuntimeError("DeepSeek returned an empty viral-content response")
+    return content
 
 
 _LLM_CALLERS = {
@@ -737,7 +735,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--language",
         default=None,
-        help="Language: 'en' or 'de'. Overrides VIRAL_LLM_LANGUAGE.",
+        help="Language: 'en', 'de', or 'bn'. Overrides VIRAL_LLM_LANGUAGE.",
     )
     parser.add_argument(
         "--theme",

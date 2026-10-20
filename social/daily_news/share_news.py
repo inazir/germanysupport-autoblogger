@@ -107,10 +107,15 @@ def _get_news_targets() -> str:
     ).strip()
 
 
-def _build_hashtags() -> str:
+def _build_hashtags(language: str = "bn") -> str:
+    default_hashtags = (
+        "#Germany #Expats #GermanyNews #GermanySupport"
+        if language not in {"bn", "bengali", "bangla"}
+        else "#জার্মানি #প্রবাসী #জার্মানিখবর #GermanySupport"
+    )
     return os.getenv(
         "NEWS_HASHTAGS",
-        "#Germany #Expats #GermanyNews #GermanySupport",
+        default_hashtags,
     ).strip()
 
 
@@ -141,7 +146,7 @@ def _build_social_post(
         link=top_url,
         summary=caption,
         hashtags=hashtags,
-        language="en",
+        language=os.getenv("NEWS_LANGUAGE", "bn").strip().lower(),
         # Image is already generated — set directly, don't re-trigger generation
         generate_image=False,
         generate_video=False,
@@ -202,10 +207,11 @@ def run(dry_run: bool = False, target_names: str | None = None) -> dict:
     # Step 2: Generate AI caption
     # ------------------------------------------------------------------
     log.info("Step 2: Generating AI caption...")
-    caption = generate_caption(items, top_n=top_main)
+    language = os.getenv("NEWS_LANGUAGE", "bn").strip().lower()
+    caption = generate_caption(items, top_n=top_main, language=language)
     log.info(f"  Caption ready ({len(caption)} chars)")
 
-    hashtags   = _build_hashtags()
+    hashtags   = _build_hashtags(language)
     external_id = _make_external_id(items)
 
     # ------------------------------------------------------------------

@@ -281,10 +281,13 @@ def _get_site_url() -> str:
 
 
 def _build_caption_prompt(prompt_hint: str, language: str, site_url: str) -> str:
-    lang_instruction = (
-        "Write in English." if language == "en"
-        else "Schreibe auf Deutsch."
-    )
+    language = language.lower().strip()
+    if language in {"bn", "bengali", "bangla"}:
+        lang_instruction = "Write entirely in Bengali (Bangla script). Do not use English or German except for unavoidable proper names or URLs."
+    elif language == "en":
+        lang_instruction = "Write in English."
+    else:
+        lang_instruction = "Schreibe auf Deutsch."
     return f"""You are a social media writer for GermanySupport.de — a practical guide for immigrants, expats, and newcomers living in Germany.
 
 Write ONE social media post about: {prompt_hint}
@@ -300,7 +303,8 @@ Section 2 — CAPTION (the full post text for Facebook/Instagram):
 - Format: hook line → 1–2 tip lines → CTA line
 - Hook: short, punchy, starts with an emoji or a bold question/statement
 - Tip: practical, specific, actionable (1–2 sentences max)
-- CTA: end with something like "Follow GermanySupport for daily Germany tips 🇩🇪" or "More at {site_url}"
+- CTA: End with a natural Bengali follow request and to follow visit our website.
+- Do not include URLs or website links in the caption."
 - Total length: 5–9 lines, under 280 words
 - Use 1–3 relevant emojis total, do NOT overload
 - Tone: helpful, modern, trustworthy — NOT clickbait
@@ -381,7 +385,7 @@ def generate_caption_anthropic(prompt_hint: str, language: str, site_url: str) -
 
 
 def generate_caption_deepseek(prompt_hint: str, language: str, site_url: str) -> Tuple[str, str]:
-    import urllib.request
+    from openai import OpenAI
 
     api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
     model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat").strip()
@@ -390,31 +394,18 @@ def generate_caption_deepseek(prompt_hint: str, language: str, site_url: str) ->
     if not api_key:
         raise RuntimeError("DEEPSEEK_API_KEY is not set in .env")
 
-    payload = json.dumps({
-        "model": model,
-        "max_tokens": max_tokens,
-        "messages": [
-            {
-                "role": "user",
-                "content": _build_caption_prompt(prompt_hint, language, site_url),
-            }
-        ],
-    }).encode("utf-8")
-
-    req = urllib.request.Request(
-        "https://api.deepseek.com/v1/chat/completions",
-        data=payload,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        },
-        method="POST",
+    client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
+    response = client.chat.completions.create(
+        model=model,
+        messages=[{
+            "role": "user",
+            "content": _build_caption_prompt(prompt_hint, language, site_url),
+        }],
+        max_tokens=max_tokens,
     )
-
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        body = json.loads(resp.read().decode("utf-8"))
-
-    raw = body["choices"][0]["message"]["content"].strip()
+    raw = (response.choices[0].message.content or "").strip()
+    if not raw:
+        raise RuntimeError("DeepSeek returned an empty caption response")
     return _parse_llm_response(raw)
 
 
@@ -465,7 +456,13 @@ def build_tip_post(
 
     # Default hashtags if none supplied
     if not hashtags:
-        if language == "de":
+        language = language.lower().strip()
+        if language in {"bn", "bengali", "bangla"}:
+            hashtags = os.getenv(
+                "SOCIAL_DEFAULT_HASHTAGS_BN",
+                "#germanysupport #জার্মানি #প্রবাসী #জার্মানিজীবন",
+            )
+        elif language == "de":
             hashtags = os.getenv(
                 "SOCIAL_DEFAULT_HASHTAGS_DE",
                 "#germanysupport #deutschland #tipps #expat",
@@ -512,7 +509,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--language",
         default=None,
-        help="Caption language: 'en' or 'de'. Overrides TIPS_LLM_LANGUAGE in .env.",
+        help="Caption language: 'en', 'de', or 'bn'. Overrides TIPS_LLM_LANGUAGE in .env.",
     )
     parser.add_argument(
         "--cooldown-days",
