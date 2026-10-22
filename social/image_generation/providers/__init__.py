@@ -5,6 +5,7 @@ Registry of all available image generation providers.
 """
 
 from social.image_generation.providers.pollinations_provider import PollinationsProvider
+from social.image_generation.providers.cloudflare_provider   import CloudflareProvider
 from social.image_generation.providers.pexels_provider       import PexelsProvider
 from social.image_generation.providers.openai_provider       import OpenAIProvider
 from social.image_generation.providers.stability_provider    import StabilityProvider
@@ -13,6 +14,7 @@ from social.image_generation.providers.flux_provider         import FluxProvider
 
 __all__ = [
     "PollinationsProvider",
+    "CloudflareProvider",
     "PexelsProvider",
     "OpenAIProvider",
     "StabilityProvider",
@@ -25,6 +27,7 @@ __all__ = [
 # ---------------------------------------------------------------------------
 PROVIDER_REGISTRY = {
     "pollinations": PollinationsProvider,
+    "cloudflare":   CloudflareProvider,
     "pexels":       PexelsProvider,
     "openai":       OpenAIProvider,
     "stability":    StabilityProvider,

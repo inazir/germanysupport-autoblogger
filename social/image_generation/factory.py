@@ -29,6 +29,7 @@ from social.image_generation.base import BaseImageProvider
 # ---------------------------------------------------------------------------
 _PROVIDER_REGISTRY: dict[str, str] = {
     "pollinations": "social.image_generation.providers.pollinations_provider.PollinationsProvider",
+    "cloudflare":   "social.image_generation.providers.cloudflare_provider.CloudflareProvider",
     "pexels":       "social.image_generation.providers.pexels_provider.PexelsProvider",
     "openai":       "social.image_generation.providers.openai_provider.OpenAIProvider",
     "stability":    "social.image_generation.providers.stability_provider.StabilityProvider",
@@ -69,7 +70,7 @@ class ImageProviderFactory:
         """
         Returns [primary, fallback, ...] in priority order.
         Unavailable or unknown providers are silently skipped.
-        Pollinations is always appended as last-resort if nothing else works.
+        Pollinations is used as a last resort only when no configured provider is available.
         """
         primary_name  = os.getenv("IMAGE_PROVIDER",          "pollinations").strip().lower()
         fallback_name = os.getenv("IMAGE_FALLBACK_PROVIDER",  "pollinations").strip().lower()
@@ -89,8 +90,8 @@ class ImageProviderFactory:
                 reason = "unavailable" if provider else "unknown/import-failed"
                 print(f"  [factory] Skipped '{name}' ({reason})")
 
-        # Always ensure pollinations is available as final fallback
-        if not any(p.provider_name == "pollinations" for p in chain):
+        # Preserve a usable default when every configured provider is unavailable.
+        if not chain:
             fallback = _load_provider("pollinations")
             if fallback and fallback.is_available():
                 chain.append(fallback)

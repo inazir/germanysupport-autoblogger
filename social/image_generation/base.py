@@ -2,7 +2,7 @@
 social/image_generation/base.py
 
 Abstract base class for all image generation providers.
-Every provider must implement generate_image() and return a URL string or None.
+Every provider must implement generate_image() and return an image URL/data URI or None.
 """
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ class BaseImageProvider(ABC):
 
         Returns
         -------
-        str  : direct image URL (not binary, not base64)
+        str  : direct image URL or image data URI
         None : on any failure — callers must handle None gracefully
         """
         ...

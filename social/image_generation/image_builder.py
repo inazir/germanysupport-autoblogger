@@ -40,7 +40,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 from social.models import SocialPost
 
@@ -57,6 +57,8 @@ SOCIAL_LOGO_PATH         = os.getenv(
 )
 SOCIAL_FONT_REGULAR_PATH = os.getenv("SOCIAL_FONT_REGULAR_PATH", "").strip()
 SOCIAL_FONT_BOLD_PATH    = os.getenv("SOCIAL_FONT_BOLD_PATH",    "").strip()
+SOCIAL_FONT_BENGALI_REGULAR_PATH = os.getenv("SOCIAL_FONT_BENGALI_REGULAR_PATH", "").strip()
+SOCIAL_FONT_BENGALI_BOLD_PATH = os.getenv("SOCIAL_FONT_BENGALI_BOLD_PATH", "").strip()
 
 # NEW: Image provider mode
 SOCIAL_IMAGE_BACKGROUND = os.getenv("SOCIAL_IMAGE_BACKGROUND", "").strip().lower()
@@ -88,8 +90,36 @@ _LAYOUT_DEFAULTS: dict[str, dict] = {
 # ---------------------------------------------------------------------------
 # Font loader — identical priority logic to social/image_builder.py
 # ---------------------------------------------------------------------------
-def _font(size: int, bold: bool = False):
+def _contains_bengali(text: str) -> bool:
+    return any("\u0980" <= char <= "\u09ff" for char in text)
+
+
+def _has_ai_background(post: SocialPost) -> bool:
+    provider = (getattr(post, "background_image_provider", None) or "").lower()
+    if provider:
+        return provider != "pexels"
+    background_path = Path(getattr(post, "background_image_path", "") or "")
+    return background_path.is_file() and background_path.stem.endswith("_ai")
+
+
+def _font(size: int, bold: bool = False, text: str = ""):
     candidates: list[str] = []
+
+    if _contains_bengali(text):
+        bengali_env_path = (
+            SOCIAL_FONT_BENGALI_BOLD_PATH if bold else SOCIAL_FONT_BENGALI_REGULAR_PATH
+        )
+        if bengali_env_path:
+            candidates.append(bengali_env_path)
+        repo_fonts = REPO_ROOT / "social" / "assets" / "fonts"
+        candidates.extend(
+            [
+                str(repo_fonts / "NotoSansBengali.ttf"),
+                str(repo_fonts / ("NotoSansBengali-Bold.ttf" if bold else "NotoSansBengali-Regular.ttf")),
+                "/usr/share/fonts/truetype/noto/NotoSansBengali.ttf",
+                "/usr/share/fonts/truetype/noto/NotoSansBengali-Bold.ttf" if bold else "/usr/share/fonts/truetype/noto/NotoSansBengali-Regular.ttf",
+            ]
+        )
 
     env_path = SOCIAL_FONT_BOLD_PATH if bold else SOCIAL_FONT_REGULAR_PATH
     if env_path:
@@ -157,11 +187,11 @@ def _truncate_line(text: str, max_chars: int) -> str:
 
 def _fit_title(draw, title: str, max_width: int, max_lines: int = 3):
     for size in [104, 96, 88, 80, 72, 66, 60]:
-        font  = _font(size, bold=True)
+        font  = _font(size, bold=True, text=title)
         lines = _wrap(draw, title, font, max_width)
         if len(lines) <= max_lines:
             return font, lines[:max_lines]
-    font  = _font(56, bold=True)
+    font  = _font(56, bold=True, text=title)
     lines = _wrap(draw, title, font, max_width)[:max_lines]
     if lines:
         lines[-1] = _truncate_line(lines[-1], 34)
@@ -170,11 +200,11 @@ def _fit_title(draw, title: str, max_width: int, max_lines: int = 3):
 
 def _fit_summary(draw, summary: str, max_width: int, max_lines: int = 2):
     for size in [38, 36, 34, 32]:
-        font  = _font(size, bold=False)
+        font  = _font(size, bold=False, text=summary)
         lines = _wrap(draw, summary, font, max_width)
         if len(lines) <= max_lines:
             return font, lines[:max_lines]
-    font  = _font(30, bold=False)
+    font  = _font(30, bold=False, text=summary)
     lines = _wrap(draw, summary, font, max_width)[:max_lines]
     if lines:
         lines[-1] = _truncate_line(lines[-1], 48)
@@ -357,6 +387,8 @@ def generate_branded_image_v2(
     show_summary: Optional[bool] = None,
     cta_text: Optional[str] = None,
 ) -> str:
+    brand_text = brand_text.replace("Brown Guy Germany", "BrownGuyGermany")
+    follow_text = os.getenv("SOCIAL_IMAGE_FOLLOW_TEXT", "Follow @brownguygermany").strip()
 
     preset           = _LAYOUT_DEFAULTS.get(layout, _LAYOUT_DEFAULTS["article"])
     resolved_summary = show_summary if show_summary is not None else preset["show_summary"]
@@ -392,9 +424,9 @@ def generate_branded_image_v2(
 
     draw = ImageDraw.Draw(image, "RGBA")
 
-    brand_font  = _font(34, bold=True)
+    brand_font  = _font(34, bold=True, text=brand_text)
+    follow_font = _font(20, bold=False, text=follow_text)
     footer_font = _font(22, bold=False)
-    cta_font    = _font(26, bold=True)
 
     logo    = _load_logo()
     brand_x = 112
@@ -408,13 +440,19 @@ def generate_branded_image_v2(
         font=brand_font, fill=(255, 255, 255),
         shadow_fill=(0, 0, 0, 55), shadow_offset=(2, 3),
     )
+    if follow_text:
+        _draw_text_with_shadow(
+            draw, (brand_x, brand_y + 43), follow_text,
+            font=follow_font, fill=(230, 236, 244, 225),
+            shadow_fill=(0, 0, 0, 70), shadow_offset=(1, 2),
+        )
 
     # ---- content panel ----
     panel_left, panel_top, panel_right, panel_bottom = 68, 470, size - 68, 980
     _add_glass_panel(
         image, (panel_left, panel_top, panel_right, panel_bottom),
-        radius=40, blur_radius=16,
-        fill=(22, 32, 60, 30), edge=(255, 255, 255, 90), highlight_alpha=18,
+        radius=40, blur_radius=4,
+        fill=(22, 32, 60, 10), edge=(255, 255, 255, 78), highlight_alpha=10,
     )
 
     draw = ImageDraw.Draw(image, "RGBA")
@@ -463,6 +501,7 @@ def generate_branded_image_v2(
             sy += summary_line_heights[i] + 8
 
     # ---- CTA ----
+    cta_font = _font(26, bold=True, text=resolved_cta)
     cta_box = (panel_left + 36, panel_bottom - 50, panel_right - 36, panel_bottom - 6)
     _add_glass_panel(image, cta_box, radius=22, blur_radius=10)
 
@@ -499,6 +538,83 @@ def generate_branded_image_v2(
                 shadow_offset=(1, 2),
             )
 
+    if _has_ai_background(post):
+        disclaimer = "AI Generated Image"
+        disclaimer_font = _font(14, bold=False, text=disclaimer)
+        disclaimer_bbox = draw.textbbox((0, 0), disclaimer, font=disclaimer_font)
+        disclaimer_width = disclaimer_bbox[2] - disclaimer_bbox[0]
+        disclaimer_height = disclaimer_bbox[3] - disclaimer_bbox[1]
+        disclaimer_box = (
+            size - disclaimer_width - 62,
+            size - disclaimer_height - 42,
+            size - 16,
+            size - 12,
+        )
+        _add_glass_panel(
+            image,
+            disclaimer_box,
+            radius=9,
+            blur_radius=4,
+            fill=(5, 10, 20, 145),
+            edge=(255, 255, 255, 72),
+            highlight_alpha=8,
+        )
+        draw = ImageDraw.Draw(image, "RGBA")
+        draw.text(
+            (disclaimer_box[0] + 23, disclaimer_box[1] + 5),
+            disclaimer,
+            font=disclaimer_font,
+            fill=(235, 240, 246, 220),
+        )
+
     image.convert("RGB").save(output_path, format="PNG")
     print(f"INFO [image_builder_v2]: saved → {output_path}")
+    return str(output_path)
+
+
+def generate_branded_image(
+    post: SocialPost,
+    brand_text: str,
+    output_dir: str | Path | None = None,
+    filename_prefix: Optional[str] = None,
+    cta_text: Optional[str] = None,
+) -> str:
+    """Backward-compatible entry point for article, tip, and viral images."""
+    return generate_branded_image_v2(
+        post=post,
+        brand_text=brand_text,
+        output_dir=output_dir,
+        filename_prefix=filename_prefix,
+        layout="article",
+        show_summary=True,
+        cta_text=cta_text,
+    )
+
+
+def export_platform_image(
+    source_path: str | Path,
+    output_size: tuple[int, int],
+    filename_prefix: str,
+) -> str:
+    source = Path(source_path)
+    width, height = output_size
+    output_path = source.parent / f"{filename_prefix}_{source.stem}_{width}x{height}.png"
+
+    with Image.open(source) as source_image:
+        image = source_image.convert("RGB")
+        if image.size == output_size:
+            image.save(output_path, format="PNG")
+            return str(output_path)
+
+        background = ImageOps.fit(image, output_size, method=Image.Resampling.LANCZOS)
+        background = background.filter(ImageFilter.GaussianBlur(radius=24))
+        overlay = Image.new("RGBA", output_size, (0, 0, 0, 70))
+        background = Image.alpha_composite(background.convert("RGBA"), overlay)
+
+        foreground = ImageOps.contain(image, output_size, method=Image.Resampling.LANCZOS)
+        left = (width - foreground.width) // 2
+        top = (height - foreground.height) // 2
+        background.alpha_composite(foreground.convert("RGBA"), (left, top))
+        background.convert("RGB").save(output_path, format="PNG")
+
     return str(output_path)

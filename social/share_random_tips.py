@@ -453,6 +453,7 @@ def build_tip_post(
 ) -> SocialPost:
     external_id = _make_external_id(category, image_title)
     site_url = _get_site_url()
+    is_bengali = language.lower().strip() in {"bn", "bengali", "bangla"}
 
     # Default hashtags if none supplied
     if not hashtags:
@@ -476,8 +477,8 @@ def build_tip_post(
     return SocialPost(
         external_id=external_id,
         content_type="article",
-        title=image_title,         # large heading on the branded image
-        promo_text=image_subtitle, # short subtitle on image (image_builder prefers promo_text over summary)
+        title=image_subtitle if is_bengali and image_subtitle else image_title,
+        promo_text=None if is_bengali else image_subtitle,
         summary=caption,           # full post body used by formatter.py for Facebook/Instagram caption
         link=site_url,
         language=language,

@@ -119,7 +119,7 @@ def _fetch_pexels_background(external_id: str) -> Optional[str]:
 # Image summary for the PIL overlay
 # ---------------------------------------------------------------------------
 
-def _build_image_title(items: List[NewsItem]) -> str:
+def _build_image_title(items: List[NewsItem], language: str = "en") -> str:
     """
     Generate a short image-friendly title from the first news item.
 
@@ -140,6 +140,11 @@ def _build_image_title(items: List[NewsItem]) -> str:
     primary = os.getenv("NEWS_AI_PROVIDER", "claude").strip().lower()
     fallback = os.getenv("NEWS_AI_FALLBACK_PROVIDER", "deepseek").strip().lower()
 
+    language_instruction = (
+        "Write the title entirely in Bengali (Bangla script)."
+        if language.lower().strip() in {"bn", "bengali", "bangla"}
+        else "Write the title in English."
+    )
     prompt = f"""
 Rewrite this news headline into a SHORT title for a square social media image.
 
@@ -153,6 +158,7 @@ Requirements:
 - No emojis
 - No hashtags
 - No clickbait
+- {language_instruction}
 - Output ONLY the final rewritten title
 
 Headline:
@@ -288,7 +294,7 @@ def generate_news_image(
         external_id=external_id,
         content_type="article",
         #title=f"Germany Daily Update\n{today}",
-        title=_build_image_title(items),
+        title=_build_image_title(items, os.getenv("NEWS_LANGUAGE", "en")),
         link="https://germanysupport.de",
         #summary=_build_image_summary(items, top_n),
         summary="",

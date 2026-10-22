@@ -646,6 +646,11 @@ def _get_site_url() -> str:
 
 
 def build_viral_post(content: ViralContent, language: str) -> SocialPost:
+    is_bengali = language.lower().strip() in {"bn", "bengali", "bangla"}
+    first_post_line = next(
+        (line.strip() for line in content.post_text.splitlines() if line.strip()),
+        content.image_title,
+    )
     hashtags = os.getenv(
         "VIRAL_HASHTAGS",
         "#germanysupport #germany #expat #immigrant" if language == "en"
@@ -655,7 +660,7 @@ def build_viral_post(content: ViralContent, language: str) -> SocialPost:
     return SocialPost(
         external_id=_make_external_id(content.theme, content.prompt_hint),
         content_type="article",
-        title=content.image_title,
+        title=first_post_line if is_bengali else content.image_title,
         promo_text=content.post_text[:120],   # subtitle on branded image
         summary=content.post_text,            # full caption used by formatter.py
         link=_get_site_url(),

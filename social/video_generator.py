@@ -15,7 +15,7 @@ import asyncio
 import edge_tts
 
 from social.models import SocialPost
-from social.image_builder import (
+from social.image_generation.image_builder import (
     REPO_ROOT,
     _add_glass_panel,
     _draw_text_with_shadow,

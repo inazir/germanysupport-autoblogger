@@ -5,9 +5,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Dict, List
 
-from social.image_builder import DEFAULT_OUTPUT_DIR, generate_branded_image
+from social.image_generation.image_builder import export_platform_image, generate_branded_image
+from social.image_generation.prompts import build_social_image_prompt
+from social.image_generation.service import ImageGenerationService
 from social.models import SocialPost, SocialTarget
-from social.pexels_client import fetch_pexels_background
 from social.platforms.base import PlatformError
 from social.platforms.facebook import FacebookPublisher
 from social.platforms.instagram import InstagramPublisher
@@ -15,6 +16,29 @@ from social.store import SocialStore
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _parse_image_size(value: str, default: tuple[int, int]) -> tuple[int, int]:
+    try:
+        width, height = value.lower().split("x", 1)
+        parsed = (int(width), int(height))
+        if min(parsed) < 320 or max(parsed) > 4096:
+            raise ValueError
+        return parsed
+    except (TypeError, ValueError):
+        return default
+
+
+def _target_image_size(target: SocialTarget) -> tuple[int, int]:
+    if target.platform == "instagram":
+        return _parse_image_size(
+            os.getenv("SOCIAL_INSTAGRAM_IMAGE_SIZE", "1080x1350"),
+            (1080, 1350),
+        )
+    return _parse_image_size(
+        os.getenv("SOCIAL_FACEBOOK_IMAGE_SIZE", "1200x630"),
+        (1200, 630),
+    )
 
 
 def get_platform_publisher(target: SocialTarget):
@@ -73,26 +97,35 @@ def _ensure_background_image(post: SocialPost, target: SocialTarget) -> None:
     if getattr(post, "background_image_path", None):
         return
 
+    topic_parts = [
+        post.title,
+        getattr(post, "category_label", None),
+        post.promo_text,
+        post.summary,
+    ]
+    topic = ". ".join(str(part).strip() for part in topic_parts if str(part or "").strip())
+    prompt = build_social_image_prompt(topic[:280] or "daily life in Germany")
+    context: dict = {}
+
     try:
-        bg = fetch_pexels_background(
-            external_id=post.external_id,
-            title=post.title,
-            summary=post.summary or post.promo_text or "",
-            category_label=getattr(post, "category_label", "") or "",
-            content_type=post.content_type,
-            output_dir=DEFAULT_OUTPUT_DIR,
-            filename_prefix=target.key,
+        background_path = ImageGenerationService.generate_to_file(
+            prompt,
+            filename_prefix=f"{target.key}_background",
+            context=context,
         )
-        if bg:
-            post.background_image_path = bg.get("local_path")
-            post.background_image_photographer = bg.get("photographer")
-            post.background_image_source_url = bg.get("photo_url")
+        if background_path:
+            post.background_image_path = background_path
+            metadata = context.get("image_metadata", {})
+            post.background_image_provider = metadata.get("provider")
+            post.background_image_photographer = metadata.get("photographer")
+            post.background_image_source_url = metadata.get("source")
     except Exception as exc:
-        print(f"WARNING: Pexels background fetch failed: {exc}")
+        print(f"WARNING: Background image generation failed: {exc}")
 
 
 def _prepare_generated_image(post: SocialPost, target: SocialTarget) -> None:
-    if not post.generate_image:
+    existing_path = (getattr(post, "generated_image_path", None) or "").strip()
+    if not post.generate_image and not existing_path:
         return
 
     brand_text = os.getenv("SOCIAL_BRAND_TEXT", "GermanySupport")
@@ -100,22 +133,26 @@ def _prepare_generated_image(post: SocialPost, target: SocialTarget) -> None:
     # 🔥 NOW POWERED BY IMAGE ORCHESTRATOR (via _ensure_background_image)
     _ensure_background_image(post, target)
 
-    existing_path = (getattr(post, "generated_image_path", None) or "").strip()
+    master_path = (getattr(post, "generated_image_master_path", None) or "").strip()
+    if not master_path and existing_path and Path(existing_path).exists():
+        master_path = existing_path
 
-    if existing_path and Path(existing_path).exists():
-        if not getattr(post, "generated_image_public_url", None):
-            post.generated_image_public_url = _build_generated_image_public_url(existing_path)
-
-    else:
-        output_path = generate_branded_image(
+    if not master_path or not Path(master_path).exists():
+        master_path = generate_branded_image(
             post=post,
             brand_text=brand_text,
-            filename_prefix=target.key,
+            filename_prefix="social_master",
             cta_text="Check the comments section for more updates!",
         )
+    post.generated_image_master_path = master_path
 
-        post.generated_image_path = output_path
-        post.generated_image_public_url = _build_generated_image_public_url(output_path)
+    output_path = export_platform_image(
+        master_path,
+        output_size=_target_image_size(target),
+        filename_prefix=target.platform,
+    )
+    post.generated_image_path = output_path
+    post.generated_image_public_url = _build_generated_image_public_url(output_path)
 
     if getattr(post, "generated_image_public_url", None):
         post.image_url = post.generated_image_public_url
@@ -240,7 +277,7 @@ def publish_to_targets(
             continue
 
         try:
-            if post.generate_image:
+            if post.generate_image or getattr(post, "generated_image_path", None):
                 _prepare_generated_image(post, target)
 
             has_image = bool(

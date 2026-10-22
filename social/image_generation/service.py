@@ -78,6 +78,10 @@ class ImageGenerationService:
                         }
                 else:
                     url = result
+
+                if url and context is not None:
+                    metadata = context.setdefault("image_metadata", {})
+                    metadata.setdefault("provider", provider.provider_name)
             except Exception as exc:
                 print(f"  [ImageService] {provider.provider_name} raised unexpectedly: {exc}")
                 url = None
@@ -128,27 +132,37 @@ class ImageGenerationService:
 
         Returns local path string, or None on failure.
         """
+        import base64
         import hashlib
         import requests
         from pathlib import Path
 
         # Use the same output dir as the image builders
         try:
-            from social.image_builder import DEFAULT_OUTPUT_DIR
+            from social.image_generation.image_builder import DEFAULT_OUTPUT_DIR
         except Exception:
             from pathlib import Path as _P
             DEFAULT_OUTPUT_DIR = _P(__file__).resolve().parents[2] / "social" / "cache" / "generated_images"
 
         try:
-            resp = requests.get(image_url, timeout=30)
-            resp.raise_for_status()
+            if image_url.startswith("data:image/"):
+                header, encoded = image_url.split(",", 1)
+                image_bytes = base64.b64decode(encoded, validate=True)
+                extension = "png" if "image/png" in header else "jpg"
+                digest_source = image_bytes
+            else:
+                resp = requests.get(image_url, timeout=30)
+                resp.raise_for_status()
+                image_bytes = resp.content
+                extension = "jpg"
+                digest_source = image_url.encode()
 
-            digest   = hashlib.sha256(image_url.encode()).hexdigest()[:16]
-            filename = f"{filename_prefix}_{digest}_ai.jpg"
+            digest   = hashlib.sha256(digest_source).hexdigest()[:16]
+            filename = f"{filename_prefix}_{digest}_ai.{extension}"
             out_path = Path(DEFAULT_OUTPUT_DIR) / filename
             out_path.parent.mkdir(parents=True, exist_ok=True)
 
-            out_path.write_bytes(resp.content)
+            out_path.write_bytes(image_bytes)
             print(f"  [ImageService] Cached AI image → {out_path}")
             return str(out_path)
 
