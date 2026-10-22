@@ -45,7 +45,9 @@ def build_deal_summary(post: SocialPost, max_len: int | None = None) -> str:
 
 
 def build_facebook_message(post: SocialPost, target: SocialTarget) -> str:
-    parts = [f"🔥 {_clean(post.title)}"]
+    language = _clean(post.language).lower()
+    title = _clean(post.title)
+    parts = [] if language in {"bn", "bengali", "bangla"} or not title else [f"🔥 {title}"]
     if post.content_type == "deal":
         body = build_deal_summary(post)
     else:

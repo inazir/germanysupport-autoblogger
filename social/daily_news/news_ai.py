@@ -47,7 +47,8 @@ REQUIREMENTS:
 - List each headline as a numbered point with a relevant emoji
 - Keep each point to 1-2 short lines
 - End with ONE engaging question that invites comments (e.g. ""Read more top news in the comments!" and "Which update affects you most? Comment below 👇" )
-- Final line: "Follow @GermanySupport for daily updates."
+- Final line: ask readers in Bengali to follow @brownguygermany and visit the GermanySupport website using the link in the first comment.
+- Do not include URLs or website links in the post.
 - Friendly, credible, easy, human writing
 - {language_instruction}
 - Avoid fake sensationalism or clickbait
@@ -145,7 +146,7 @@ def _template_caption(items: List[NewsItem], top_n: int = 3, language: str = "en
             "",
             "কোন খবরটি আপনাকে সবচেয়ে বেশি প্রভাবিত করে? নিচে মন্তব্য করুন 👇",
             "",
-            "প্রতিদিনের আপডেটের জন্য আমাদের পেজটি অনুসরণ করুন।",
+            "প্রতিদিনের আপডেট পেতে @brownguygermany ফলো করুন এবং GermanySupport ওয়েবসাইট দেখতে প্রথম কমেন্টের লিংকে যান।",
         ]
     else:
         cta_lines = [

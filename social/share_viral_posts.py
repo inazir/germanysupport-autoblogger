@@ -347,7 +347,8 @@ POST RULES:
 - Line 1: scroll-stopping hook, max 12 words, NOT starting with "I"
 - Body: 3-5 short paragraphs, 1-3 sentences each, no bullet points
 - Second-to-last line: direct engagement question (e.g. "What was your biggest shock? Drop it below 👇")
-- Last line: soft CTA (e.g. "Follow GermanySupport for daily Germany tips 🇩🇪")
+- Last line: ask readers in Bengali to follow @brownguygermany and visit the GermanySupport website using the link in the first comment
+- Do not include URLs or website links in the post
 - Total: 150-280 words, max 3 emojis, no hashtags, no markdown
 
 COMMENT RULES (each comment):

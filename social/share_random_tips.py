@@ -303,8 +303,8 @@ Section 2 — CAPTION (the full post text for Facebook/Instagram):
 - Format: hook line → 1–2 tip lines → CTA line
 - Hook: short, punchy, starts with an emoji or a bold question/statement
 - Tip: practical, specific, actionable (1–2 sentences max)
-- CTA: End with a natural Bengali follow request and to follow visit our website.
-- Do not include URLs or website links in the caption."
+- CTA: End by asking readers in Bengali to follow @brownguygermany and visit the GermanySupport website using the link in the first comment
+- Do not include URLs or website links in the caption
 - Total length: 5–9 lines, under 280 words
 - Use 1–3 relevant emojis total, do NOT overload
 - Tone: helpful, modern, trustworthy — NOT clickbait
