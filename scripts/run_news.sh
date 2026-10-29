@@ -32,6 +32,7 @@ echo "NEW EXECUTION START: $(date '+%Y-%m-%d %H:%M:%S')"
 echo "==============================================================================="
 echo "Repository: $REPO_DIR"
 
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 export NEWS_LANGUAGE="${NEWS_LANGUAGE:-bn}"
 echo "Language: $NEWS_LANGUAGE"
 
@@ -71,7 +72,7 @@ echo "--------------------------------------------------------------------------
 # -------------------------------------------------------------------
 # Run script
 # -------------------------------------------------------------------
-python3 -m social.daily_news.share_news "$MODE"
+"$PYTHON_BIN" -m social.daily_news.share_news "$MODE"
 
 EXIT_CODE=$?
 
