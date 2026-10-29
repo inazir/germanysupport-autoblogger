@@ -32,6 +32,33 @@ BRAND_TEXT  = os.getenv("SOCIAL_BRAND_TEXT", "GermanySupport.de")
 VIDEO_W, VIDEO_H = 1080, 1920
 FPS = 24
 
+def _language_env_values(prefix: str, language: str) -> List[str]:
+    normalized = re.sub(r"[^A-Za-z0-9]+", "_", (language or "").strip()).upper().strip("_")
+    primary = normalized.split("_", 1)[0] if normalized else ""
+    keys = [f"{prefix}_{normalized}"] if normalized else []
+    if primary and primary != normalized:
+        keys.append(f"{prefix}_{primary}")
+    keys.append(f"{prefix}_DEFAULT")
+    return [os.getenv(key, "").strip() for key in keys if os.getenv(key, "").strip()]
+
+
+def _voice_for_language(language: str) -> str:
+    configured = _language_env_values("EDGE_TTS_VOICE", language)
+    if not configured:
+        raise RuntimeError(
+            f"No Edge TTS voice configured for language '{language}'. "
+            "Set EDGE_TTS_VOICE_<LANG> or EDGE_TTS_VOICE_DEFAULT."
+        )
+    voices = [voice.strip() for voice in configured[0].split(",") if voice.strip()]
+    if not voices:
+        raise RuntimeError(f"Edge TTS voice configuration is empty for language '{language}'")
+    return random.choice(voices)
+
+
+def _spoken_site_name(language: str) -> str:
+    configured = _language_env_values("EDGE_TTS_SPOKEN_SITE_NAME", language)
+    return configured[0] if configured else "GermanySupport.de"
+
 def _get_audio_duration(file_path: Path) -> float:
     ffprobe_path = os.getenv("FFPROBE_PATH", "ffprobe")
     cmd = [
@@ -45,15 +72,11 @@ def _get_audio_duration(file_path: Path) -> float:
         print(f"WARNING: ffprobe failed at {ffprobe_path}. Error: {e}")
         return 20.0
 
-def _generate_voiceover(scenes: List[str], out_dir: Path) -> Path:
+def _generate_voiceover(scenes: List[str], out_dir: Path, language: str = "en") -> Path:
     full_text = ". ".join(scenes)
     clean_text = re.sub(r'https?://\S+', '', full_text)
-    clean_text = clean_text.replace("GermanySupport.de", "Germany Support dot de")
-    voices = [
-        "en-US-AriaNeural", "en-US-JennyNeural", "en-GB-SoniaNeural",
-        "en-AU-NatashaNeural", "en-US-GuyNeural",
-    ]
-    voice = random.choice(voices)
+    clean_text = clean_text.replace("GermanySupport.de", _spoken_site_name(language))
+    voice = _voice_for_language(language)
     print(f"INFO: Selected voice: {voice}")
     audio_path = out_dir / "voiceover.mp3"
     async def _run():
@@ -93,13 +116,14 @@ def _fetch_pexels_backgrounds(query: str, count: int, out_dir: Path) -> List[Pat
 def _build_scenes(post: SocialPost) -> List[str]:
     api_key = os.getenv("DEEPSEEK_API_KEY")
     client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
+    language = (post.language or "en").strip().lower()
     prompt = f"""
 Create text for a 20-second social media video.
 TITLE: {post.title}
 SUMMARY: {post.summary}
 REQUIREMENTS:
-1. Output language MUST be English only.
-2. Rewrite any German content into natural English.
+1. Output language MUST match this language code: {language}.
+2. Rewrite the source content into natural spoken language for that locale.
 3. 5 lines total exactly:
    - Line 1 = Strong scroll-stopping Hook
    - Line 2 = Important useful point
@@ -122,11 +146,16 @@ REQUIREMENTS:
         lines = [line.strip().strip("•-*1234567890. ") for line in raw_text.split("\n") if line.strip()]
         lines = lines[:5]
         while len(lines) < 5:
-            lines.append("Visit GermanySupport.de")
+            lines.append(lines[-1] if lines else post.title)
         return lines
     except Exception as e:
         print(f"ERROR: DeepSeek Video Text Generation failed: {e}")
-        return ["Important Germany update", "New rules may affect you", "Check latest details now", "Simple guide available", "Visit GermanySupport.de"]
+        source_text = " ".join(filter(None, [post.title, post.summary or ""]))
+        fallback = [part.strip() for part in re.split(r"(?<=[.!?।])\s+", source_text) if part.strip()]
+        fallback = fallback[:5] or [post.title or "GermanySupport.de"]
+        while len(fallback) < 5:
+            fallback.append(fallback[-1])
+        return fallback
 
 def _draw_branded_frame(text: str, bg_path: Optional[Path], out_path: Path) -> None:
     if bg_path and bg_path.exists():
@@ -156,7 +185,7 @@ def _draw_branded_frame(text: str, bg_path: Optional[Path], out_path: Path) -> N
                      radius=44, blur_radius=18, fill=(22, 32, 60, 175), edge=(255, 255, 255, 90), highlight_alpha=20)
 
     draw = ImageDraw.Draw(img)
-    text_font = _font(68, bold=True)
+    text_font = _font(68, bold=True, text=text)
     wrapped_lines = _wrap(draw, text, text_font, VIDEO_W - panel_margin * 2 - 80)
     line_h = draw.textbbox((0, 0), "Ag", font=text_font)[3]
     line_gap = 14
@@ -186,7 +215,8 @@ def generate_short_video(post: SocialPost) -> str:
     """Generates a complete video synced perfectly to the AI voice duration."""
 
     slug = re.sub(r"[^a-z0-9]+", "-", (post.title or "video").lower()).strip("-")[:40]
-    out_dir = REPO_ROOT / "social" / "cache" / "generated_videos" / slug
+    language = re.sub(r"[^a-z0-9]+", "-", (post.language or "en").lower()).strip("-") or "en"
+    out_dir = REPO_ROOT / "social" / "cache" / "generated_videos" / f"{slug}-{language}"
     out_dir.mkdir(parents=True, exist_ok=True)
     output_file = out_dir / "final_video.mp4"
 
@@ -206,7 +236,7 @@ def generate_short_video(post: SocialPost) -> str:
         output_file.unlink()
 
     scenes = _build_scenes(post)
-    voice_path = _generate_voiceover(scenes, out_dir)
+    voice_path = _generate_voiceover(scenes, out_dir, post.language)
     audio_duration = _get_audio_duration(voice_path)
     video_total_time = audio_duration + 0.8
     per_scene_duration = video_total_time / len(scenes)

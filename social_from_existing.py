@@ -41,6 +41,8 @@ SOCIAL_EXISTING_ONLY_ENGLISH = os.getenv(
     "true",
 ).strip().lower() in {"1", "true", "yes", "on"}
 
+SOCIAL_EXISTING_LANGUAGE = os.getenv("SOCIAL_EXISTING_LANGUAGE", "en").strip().lower() or "en"
+
 
 # --- Helper Functions ---
 
@@ -90,18 +92,37 @@ def normalize_hashtag(tag: str) -> str:
     tag = (tag or "").strip()
     if not tag: return ""
     if not tag.startswith("#"): tag = f"#{tag}"
-    tag = re.sub(r"[^#A-Za-z0-9_]", "", tag)
+    tag = re.sub(r"[^#\w]", "", tag, flags=re.UNICODE)
     return tag
 
 
-def generate_caption_and_hashtags(title: str, excerpt: str) -> Tuple[str, List[str]]:
+def target_language(target_key: str) -> str:
+    env_key = re.sub(r"[^A-Za-z0-9]+", "_", target_key).upper().strip("_")
+    return os.getenv(
+        f"SOCIAL__{env_key}__LANGUAGE",
+        SOCIAL_EXISTING_LANGUAGE,
+    ).strip().lower() or SOCIAL_EXISTING_LANGUAGE
+
+
+def generate_caption_and_hashtags(title: str, excerpt: str, language: str) -> Tuple[str, List[str]]:
     """Uses DeepSeek-V4-Pro to generate high-speed, low-cost social media content."""
     clean_title = clean_html(title)
     clean_excerpt = clean_html(excerpt)
+
+    language_instructions = {
+        "bn": "Write entirely in Bengali using Bangla script.",
+        "en": "Write entirely in English.",
+        "de": "Write entirely in German.",
+    }
+    language_instruction = language_instructions.get(
+        language,
+        f"Write entirely in the language represented by locale code '{language}'.",
+    )
     
     prompt = (
         f"Create a short, engaging social media caption for this article: {clean_title}. "
         f"Context: {clean_excerpt}. "
+        f"{language_instruction} "
         "Return a JSON object with 'caption' (string) and 'hashtags' (list of strings)."
     )
 
@@ -114,7 +135,7 @@ def generate_caption_and_hashtags(title: str, excerpt: str) -> Tuple[str, List[s
         )
         data = json.loads(response.choices[0].message.content)
         caption = str(data.get("caption") or "").strip()
-        hashtags = [normalize_hashtag(x) for x in data.get("hashtags", []) if x]
+        hashtags = [normalized for x in data.get("hashtags", []) if x if (normalized := normalize_hashtag(x))]
         return caption, hashtags
     except Exception as exc:
         print(f"WARNING: DeepSeek caption generation failed: {exc}")
@@ -135,7 +156,14 @@ def select_platform_hashtags(all_hashtags: List[str], platform: str) -> List[str
     return all_hashtags[:limit]
 
 
-def build_social_post(wp_post: dict, caption: str, all_hashtags: List[str], target_key: str, platform: str) -> SocialPost:
+def build_social_post(
+    wp_post: dict,
+    caption: str,
+    all_hashtags: List[str],
+    target_key: str,
+    platform: str,
+    language: str,
+) -> SocialPost:
     title = clean_html(wp_post["title"]["rendered"])
     selected_tags = select_platform_hashtags(all_hashtags, platform)
     hashtags_str = " ".join(selected_tags)
@@ -148,6 +176,7 @@ def build_social_post(wp_post: dict, caption: str, all_hashtags: List[str], targ
         summary=caption,
         hashtags=hashtags_str,
         wp_post_id=wp_post["id"],
+        language=language,
         generate_image=True,
         generate_video=True, 
     )
@@ -206,22 +235,27 @@ def main(dry_run: bool = False, target_names: str | None = None, only_english: b
     selected = random.choice(candidates)
     print(f"Selected post: {selected['title']['rendered']} (ID: {selected['id']})")
 
-    # 1. Generate content via DeepSeek
-    caption, hashtags = generate_caption_and_hashtags(
-        selected["title"]["rendered"], 
-        selected.get("excerpt", {}).get("rendered", "")
-    )
-
     aggregate = {"posted": [], "skipped": [], "failed": []}
+    localized_content: dict[str, Tuple[str, List[str]]] = {}
 
     for target_key in target_keys:
         if target_key not in targets: continue
         target = targets[target_key]
+        language = target_language(target_key)
         
         ext_id = f"wp:{selected['id']}:{target_key}"
         if store.already_posted(target_key, ext_id):
             print(f"Skipping {target_key}: already posted.")
             continue
+
+        if language not in localized_content:
+            localized_content[language] = generate_caption_and_hashtags(
+                selected["title"]["rendered"],
+                selected.get("excerpt", {}).get("rendered", ""),
+                language,
+            )
+        caption, hashtags = localized_content[language]
+        print(f"Target {target_key}: language={language}")
 
         # 2. Build the Post Object
         social_post = build_social_post(
@@ -230,6 +264,7 @@ def main(dry_run: bool = False, target_names: str | None = None, only_english: b
             all_hashtags=hashtags,
             target_key=target_key,
             platform=target.platform,
+            language=language,
         )
 
         # 3. Trigger Video Generation
