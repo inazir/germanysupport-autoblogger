@@ -94,6 +94,65 @@ def _contains_bengali(text: str) -> bool:
     return any("\u0980" <= char <= "\u09ff" for char in text)
 
 
+def _text_options(text: str) -> dict:
+    if _contains_bengali(text):
+        return {"direction": "ltr", "language": "bn"}
+    return {}
+
+
+def _textbbox(draw: ImageDraw.ImageDraw, text: str, font, **kwargs):
+    options = _text_options(text)
+    options.update(kwargs)
+    try:
+        return draw.textbbox((0, 0), text, font=font, **options)
+    except (TypeError, ValueError):
+        return draw.textbbox((0, 0), text, font=font)
+
+
+def _draw_text(draw: ImageDraw.ImageDraw, position, text: str, font, **kwargs) -> None:
+    options = _text_options(text)
+    options.update(kwargs)
+    try:
+        draw.text(position, text, font=font, **options)
+    except (TypeError, ValueError):
+        draw.text(position, text, font=font, **kwargs)
+
+
+def render_bengali_text_card(
+    text: str,
+    font_path: str,
+    font_size: int = 62,
+    text_color=(255, 255, 255, 255),
+    bg_color=(0, 0, 0, 0),
+    padding: int = 20,
+) -> Image.Image:
+    """Render shaped Bengali text into a transparent PNG-ready RGBA image."""
+    font = ImageFont.truetype(font_path, font_size, layout_engine=ImageFont.Layout.RAQM)
+    lines = (text or "").splitlines() or [""]
+    probe = Image.new("RGBA", (4096, 4096), bg_color)
+    probe_draw = ImageDraw.Draw(probe)
+    boxes = [_textbbox(probe_draw, line, font) for line in lines]
+    width = max((box[2] - box[0] for box in boxes), default=0) + padding * 2
+    line_height = max((box[3] - box[1] for box in boxes), default=font_size)
+    height = line_height * len(lines) + padding * 2
+    image = Image.new("RGBA", (max(width, 1), max(height, 1)), bg_color)
+    draw = ImageDraw.Draw(image)
+    y = padding
+    for line, box in zip(lines, boxes):
+        x = (image.width - (box[2] - box[0])) // 2
+        _draw_text(
+            draw,
+            (x, y),
+            line,
+            font=font,
+            fill=text_color,
+            stroke_width=3,
+            stroke_fill=(0, 0, 0, 190),
+        )
+        y += line_height
+    return image
+
+
 def _has_ai_background(post: SocialPost) -> bool:
     provider = (getattr(post, "background_image_provider", None) or "").lower()
     if provider:
@@ -166,7 +225,7 @@ def _wrap(draw: ImageDraw.ImageDraw, text: str, font, max_width: int) -> list[st
     current: str       = ""
     for word in words:
         candidate = word if not current else f"{current} {word}"
-        bbox = draw.textbbox((0, 0), candidate, font=font)
+        bbox = _textbbox(draw, candidate, font)
         if (bbox[2] - bbox[0]) <= max_width:
             current = candidate
         else:
@@ -313,9 +372,9 @@ def _draw_text_with_shadow(
 ) -> None:
     x, y   = pos
     sx, sy = shadow_offset
-    draw.text((x + sx, y + sy), text, font=font, fill=shadow_fill)
-    draw.text(
-        (x, y), text, font=font, fill=fill,
+    _draw_text(draw, (x + sx, y + sy), text, font=font, fill=shadow_fill)
+    _draw_text(
+        draw, (x, y), text, font=font, fill=fill,
         stroke_width=stroke_width,
         stroke_fill=stroke_fill if stroke_width > 0 else None,
     )
@@ -465,8 +524,8 @@ def generate_branded_image_v2(
     title_font, title_lines = _fit_title(draw, post.title or "", title_max_width)
 
     title_line_heights = [
-        draw.textbbox((0, 0), line, font=title_font, stroke_width=4)[3]
-        - draw.textbbox((0, 0), line, font=title_font, stroke_width=4)[1]
+        _textbbox(draw, line, title_font, stroke_width=4)[3]
+        - _textbbox(draw, line, title_font, stroke_width=4)[1]
         for line in title_lines
     ]
 
@@ -482,7 +541,7 @@ def generate_branded_image_v2(
         if raw:
             summary_font, summary_lines = _fit_summary(draw, raw, title_max_width)
             for line in summary_lines:
-                b = draw.textbbox((0, 0), line, font=summary_font, stroke_width=1)
+                b = _textbbox(draw, line, summary_font, stroke_width=1)
                 summary_line_heights.append(b[3] - b[1])
             summary_block_h = sum(summary_line_heights)
 
@@ -505,7 +564,7 @@ def generate_branded_image_v2(
     cta_box = (panel_left + 36, panel_bottom - 50, panel_right - 36, panel_bottom - 6)
     _add_glass_panel(image, cta_box, radius=22, blur_radius=10)
 
-    cta_bbox = draw.textbbox((0, 0), resolved_cta, font=cta_font)
+    cta_bbox = _textbbox(draw, resolved_cta, cta_font)
     cta_x = cta_box[0] + ((cta_box[2] - cta_box[0]) - (cta_bbox[2] - cta_bbox[0])) // 2
     cta_y = cta_box[1] + 8
 
@@ -522,7 +581,7 @@ def generate_branded_image_v2(
         if photographer:
             credit = f"Photo: {photographer} / Pexels"
 
-            credit_bbox = draw.textbbox((0, 0), credit, font=footer_font)
+            credit_bbox = _textbbox(draw, credit, footer_font)
             credit_w = credit_bbox[2] - credit_bbox[0]
 
             credit_x = size - 78 - credit_w
@@ -541,7 +600,7 @@ def generate_branded_image_v2(
     if _has_ai_background(post):
         disclaimer = "AI Generated Image"
         disclaimer_font = _font(14, bold=False, text=disclaimer)
-        disclaimer_bbox = draw.textbbox((0, 0), disclaimer, font=disclaimer_font)
+        disclaimer_bbox = _textbbox(draw, disclaimer, disclaimer_font)
         disclaimer_width = disclaimer_bbox[2] - disclaimer_bbox[0]
         disclaimer_height = disclaimer_bbox[3] - disclaimer_bbox[1]
         disclaimer_box = (
