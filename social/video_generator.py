@@ -8,6 +8,7 @@ import re
 import subprocess
 import random
 import hashlib
+import logging
 from pathlib import Path
 from typing import List, Optional
 
@@ -414,7 +415,9 @@ def generate_short_video(
     slug = re.sub(r"[^a-z0-9]+", "-", cache_title.lower()).strip("-")[:40]
     language = re.sub(r"[^a-z0-9]+", "-", (post.language or "en").lower()).strip("-") or "en"
     video_style = re.sub(r"[^a-z0-9_-]+", "-", (style or VIDEO_STYLE).lower()).strip("-") or "classic"
-    cache_key = f"{slug}-{language}-{video_style}-r{VIDEO_RENDERER_VERSION}"
+    renderer_mode = os.getenv("SOCIAL_VIDEO_RENDERER_MODE", "legacy").strip().lower() or "legacy"
+    cache_suffix = "-motion" if renderer_mode == "motion" else ""
+    cache_key = f"{slug}-{language}-{video_style}{cache_suffix}-r{VIDEO_RENDERER_VERSION}"
     out_dir = REPO_ROOT / "social" / "cache" / "generated_videos" / cache_key
     out_dir.mkdir(parents=True, exist_ok=True)
     output_file = out_dir / "final_video.mp4"
@@ -439,6 +442,64 @@ def generate_short_video(
         raise ValueError("Video generation requires at least one non-empty scene")
     voice_path = _generate_voiceover(scene_texts, out_dir, post.language)
     audio_duration = _get_audio_duration(voice_path)
+
+    if renderer_mode == "motion":
+        try:
+            from social.video_engine.models import RenderConfig
+            from social.video_engine.renderer import render_news_video
+
+            def _env_int(name: str, default: int) -> int:
+                try:
+                    return int(os.getenv(name, str(default)))
+                except (TypeError, ValueError):
+                    return default
+
+            def _env_float(name: str, default: float) -> float:
+                try:
+                    return float(os.getenv(name, str(default)))
+                except (TypeError, ValueError):
+                    return default
+
+            motion_config = RenderConfig(
+                mode="motion",
+                width=_env_int("SOCIAL_VIDEO_WIDTH", 1080),
+                height=_env_int("SOCIAL_VIDEO_HEIGHT", 1920),
+                fps=_env_int("SOCIAL_VIDEO_FPS", 25),
+                crf=_env_int("SOCIAL_VIDEO_CRF", 26),
+                ffmpeg_threads=max(1, _env_int("SOCIAL_VIDEO_FFMPEG_THREADS", 1)),
+                transition_duration=max(
+                    0.05,
+                    _env_float("SOCIAL_VIDEO_TRANSITION_DURATION", 0.35),
+                ),
+                subtitle_position=os.getenv(
+                    "SOCIAL_VIDEO_SUBTITLE_POSITION", "lower_safe"
+                ).strip() or "lower_safe",
+                animation_intensity=max(
+                    0.0,
+                    _env_float("SOCIAL_VIDEO_ANIMATION_INTENSITY", 1.0),
+                ),
+                template=os.getenv("SOCIAL_VIDEO_TEMPLATE", "news").strip().lower() or "news",
+            )
+            motion_output = Path(
+                render_news_video(
+                    scene_texts,
+                    output_file,
+                    motion_config,
+                    voice_path,
+                    out_dir / "voiceover-boundaries.json",
+                    _get_random_music(),
+                )
+            )
+            if not motion_output.is_file() or motion_output.stat().st_size <= 10_240:
+                raise RuntimeError(f"Motion renderer returned an invalid output: {motion_output}")
+            return str(motion_output)
+        except Exception as exc:
+            logging.warning(
+                "Motion video rendering failed for '%s'; falling back to legacy renderer: %s",
+                post.title[:80],
+                exc,
+            )
+
     caption_windows = _caption_windows(
         scene_texts,
         audio_duration,
