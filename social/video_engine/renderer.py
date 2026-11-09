@@ -217,9 +217,10 @@ def render_news_video(
         audio_map = "[narration]"
         if music_index is not None:
             audio_filter += (
-                f";[{music_index}:a]volume=0.10[music];[music][narration]"
+                ";[narration]asplit=2[narration_mix][narration_sidechain];"
+                f"[{music_index}:a]volume=0.10[music];[music][narration_sidechain]"
                 "sidechaincompress=threshold=0.03:ratio=8:attack=20:release=300[ducked];"
-                "[narration][ducked]amix=inputs=2:duration=first[aout]"
+                "[narration_mix][ducked]amix=inputs=2:duration=first[aout]"
             )
             audio_map = "[aout]"
 
